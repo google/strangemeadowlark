@@ -1,30 +1,47 @@
+#[allow(dead_code)]
+use anyhow::anyhow;
 use phf::phf_map;
+use std::{fmt::Display, path::Path};
+//use std::fs::read_to_string;
 
 // A Position describes the location of a rune of input.
 #[derive(Clone, Debug)]
-pub struct Position {
-    pub file: Option<String>, // filename (indirect for compactness)
-    pub line: usize,          // 1-based line number; 0 if line unknown
-    pub col: usize,           // 1-based column (rune) number; 0 if column unknown
+pub struct Position<'a> {
+    pub path: &'a Path, // filename (indirect for compactness)
+    pub line: u32,      // 1-based line number; 0 if line unknown
+    pub col: u32,       // 1-based column (rune) number; 0 if column unknown
 }
 
-impl Position {
-    pub fn is_valid(&self) -> bool {
-        self.file.is_some()
+impl<'a> Display for Position<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.path.to_string_lossy(),
+            self.line,
+            self.col
+        )
     }
-    pub fn filename(&self) -> String {
-        self.file.clone().unwrap_or("<invalid>".to_string())
+}
+
+impl<'a> Position<'a> {
+    pub fn new(path: &'a Path) -> Position<'a> {
+        Position {
+            path,
+            line: 1,
+            col: 1,
+        }
     }
 }
 
 // A Comment represents a single # comment.
-pub struct Comment {
-    pub start: Position,
-    pub text: String, // without trailing newline
+pub struct Comment<'a> {
+    pub start: Position<'a>,
+    pub text: &'a str, // without trailing newline
 }
 
 // The pre-lexer only operates on &str and advances index.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Illegal,
     Eof,
@@ -142,22 +159,34 @@ pub const KEYWORD_TOKEN: phf::Map<&'static str, TokenKind> = phf_map! {
     "yield" => TokenKind::Illegal,
 };
 
-struct Scanner<'a> {
+pub struct Scanner<'a> {
     rest: &'a str,
-    token: &'a str,
-    pos: Position,                 // current input position
-    depth: usize,                  // nesting of [ ] { } ( )
-    indentstk: Vec<usize>,         // stack of indentation levels
-    dents: i8,                     // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
-    line_start: bool,              // after NEWLINE; convert spaces to indentation tokens
-    keep_comments: bool,           // accumulate comments in slice
-    line_comments: Vec<Comment>,   // list of full line comments (if keepComments)
-    suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
+    token: &'a str,                    //  slice with current token
+    pos: Position<'a>,                 // current input position
+    depth: usize,                      // nesting of [ ] { } ( )
+    indentstk: Vec<usize>,             // stack of indentation levels
+    dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
+    line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
+    keep_comments: bool, // accumulate comments in slice
+    line_comments: Vec<Comment<'a>>, // list of full line comments (if keepComments)
+    suffix_comments: Vec<Comment<'a>>, // list of suffix comments (if keepComments)
+    token_buf: TokenValue<'a>,
 }
 
-struct TokenBuf {
-    pos: Position,
-    raw: str,
+#[derive(Clone, Debug)]
+pub struct TokenValue<'a> {
+    kind: TokenKind,
+    pos: Position<'a>, // start position of token
+    raw: String,       // raw text of token
+    decoded: Option<DecodedValue>,
+}
+
+#[derive(Clone, Debug)]
+enum DecodedValue {
+    Int(i64),                   // decoded int
+    BigInt(num_bigint::BigInt), // decoded integers > int64
+    Float(f64),                 // decoded float
+    String(String),             // decoded string or bytes
 }
 
 const UTF8_CHAR_SELF: u8 = 0x80;
@@ -166,14 +195,34 @@ const TRIPLE_QUOTE: &'static str = "'''";
 const TRIPLE_DOUBLE_QUOTE: &'static str = "\"\"\"";
 
 impl<'a> Scanner<'a> {
-    fn mark_start_token(&mut self, token_buf: &mut TokenBuf) {
-        self.token = self.rest;
-        self.token_buf.pos = self.pos.clone();
-    }
+    pub fn new<P: AsRef<Path>>(
+        path: &'a P,
+        data: &'a str,
+        keep_comments: bool,
+    ) -> anyhow::Result<Scanner<'a>> {
+        //let data = read_to_string(path)?;
 
-    fn mark_end_token(&mut self, token_buf: &mut TokenBuf) {
-        let len = self.rest.len() - self.token.len();
-        token_buf.raw = self.token[..len];
+        //fn new<P: AsRef<Path>>(path: P, keep_comments: bool) -> anyhow::Result<(Box<Scanner<'a>>, String)> {
+        //  let data = read_to_string(path)?;
+        let pos = Position::new(path.clone().as_ref());
+        Ok(Scanner {
+            pos: pos.clone(),
+            indentstk: vec![0],
+            line_start: true,
+            keep_comments,
+            rest: data,
+            token: data,
+            depth: 0,
+            dents: 0,
+            line_comments: vec![],
+            suffix_comments: vec![],
+            token_buf: TokenValue {
+                kind: TokenKind::Illegal,
+                raw: "".to_string(),
+                pos: pos.clone(),
+                decoded: None,
+            },
+        })
     }
 
     // peek returns the next char in the input without consuming it.
@@ -212,21 +261,31 @@ impl<'a> Scanner<'a> {
         c
     }
 
-    fn next_token(&mut self) -> (TokenKind, Position) {
-        let mut token_buf = TokenBuf {
-            raw: "",
-            pos: Position {
-                file: None,
-                line: 1,
-                col: 1,
-            },
-        }; // TODO
+    fn mark_start_token(&mut self) {
+        self.token = self.rest;
+        self.token_buf.pos = self.pos.clone();
+    }
+
+    fn mark_end_token(&mut self) {
+        let len = self.token.len() - self.rest.len();
+        self.token = &self.token[..len];
+    }
+
+    // nextToken is called by the parser to obtain the next input token.
+    // It returns the token value and sets val to the data associated with
+    // the token.
+    //'
+    // For all our input tokens, the associated data is val.pos (the
+    // position where the token begins), val.raw (the input string
+    // corresponding to the token).  For string and int tokens, the string
+    // and int fields additionally contain the token's interpreted value.
+    pub fn next_token(&mut self) -> anyhow::Result<TokenValue<'a>> {
         'start: loop {
             let mut c: char;
 
             // Deal with leading spaces and indentation.
             let mut blank = false;
-            let mut saved_line_start = self.line_start;
+            let saved_line_start = self.line_start;
             if self.line_start {
                 self.line_start = false;
                 let mut col = 0;
@@ -243,6 +302,7 @@ impl<'a> Scanner<'a> {
                         break;
                     }
                 }
+
                 // The third clause matches EOF.
                 if c == '#' || c == '\n' || c == '\0' {
                     blank = true
@@ -263,8 +323,10 @@ impl<'a> Scanner<'a> {
                             self.indentstk.pop();
                         }
                         if col != *self.indentstk.last().unwrap() {
-                            // TODO: ERROR
-                            //sc.error(sc.pos, "unindent does not match any outer indentation level")
+                            return Err(anyhow!(
+                                "{:?} unindent does not match any outer indentation level",
+                                self.pos
+                            ));
                         }
                     }
                 }
@@ -274,10 +336,13 @@ impl<'a> Scanner<'a> {
             if self.dents != 0 {
                 if self.dents < 0 {
                     self.dents = self.dents + 1;
-                    return (TokenKind::Outdent, self.pos.clone());
+                    self.token_buf.kind = TokenKind::Outdent;
+                    self.token_buf.pos = self.pos.clone();
+                    return Ok(self.token_buf.clone());
                 } else {
                     self.dents = self.dents - 1;
-                    return (TokenKind::Indent, self.pos.clone());
+                    self.token_buf.kind = TokenKind::Indent;
+                    self.token_buf.pos = self.pos.clone();
                 }
             }
 
@@ -300,16 +365,16 @@ impl<'a> Scanner<'a> {
                     c = self.peek()
                 }
                 if self.keep_comments {
-                    //sc.endToken(val)
+                    self.mark_end_token();
                     if blank {
                         self.line_comments.push(Comment {
                             start: comment_pos,
-                            text: "(comment)".to_string(), // TODO
+                            text: &"(comment)", // TODO
                         })
                     } else {
                         self.suffix_comments.push(Comment {
                             start: comment_pos,
-                            text: "(comment)".to_string(), // TODO
+                            text: &"(comment)", // TODO
                         })
                     }
                 }
@@ -334,10 +399,12 @@ impl<'a> Scanner<'a> {
                 }
 
                 // At top-level (not in an expression).
-                self.mark_start_token(&mut token_buf);
+                self.mark_start_token();
                 self.read();
-                //val.raw = "\n"
-                return (TokenKind::Newline, newline_pos);
+                self.token_buf.kind = TokenKind::Newline;
+                self.token_buf.pos = newline_pos;
+                self.token_buf.raw = "\n".to_string();
+                return Ok(self.token_buf.clone());
             }
 
             // end of file
@@ -351,22 +418,26 @@ impl<'a> Scanner<'a> {
                         break 'start;
                     } else {
                         self.line_start = true;
-                        self.mark_start_token(&mut token_buf);
-                        //val.raw = "\n"
-                        return (TokenKind::Newline, self.pos.clone());
+                        self.mark_start_token();
+                        self.token_buf.kind = TokenKind::Newline;
+                        self.token_buf.pos = self.pos.clone();
+                        self.token_buf.raw = "\n".to_string();
+                        return Ok(self.token_buf.clone());
                     }
                 }
 
-                self.mark_start_token(&mut token_buf);
-                self.mark_end_token(&mut token_buf);
-                return (TokenKind::Eof, self.pos.clone());
+                self.mark_start_token();
+                self.mark_end_token();
+                self.token_buf.kind = TokenKind::Eof;
+                self.token_buf.pos = self.pos.clone();
+                return Ok(self.token_buf.clone());
             }
 
             // line continuation
             if c == '\\' {
                 self.read();
                 if self.peek() != '\n' {
-                    // sc.errorf(sc.pos, "stray backslash in program")
+                    // self.errorf(self.pos, "stray backslash in program")
                     // TODO
                 }
                 self.read();
@@ -374,56 +445,143 @@ impl<'a> Scanner<'a> {
             }
 
             // start of the next token
-            self.mark_start_token(&mut token_buf);
+            self.mark_start_token();
 
             // comma (common case)
             if c == ',' {
                 self.read();
-                self.mark_end_token(&mut token_buf);
-                return (TokenKind::Comma, self.pos.clone());
+                self.mark_end_token();
+                self.token_buf.kind = TokenKind::Comma;
+                self.token_buf.pos = self.pos.clone();
+                return Ok(self.token_buf.clone());
             }
 
             // string literal
             if c == '"' || c == '\'' {
                 return self.scan_string(c);
             }
+
+            // identifier or keyword
+            if is_ident_start(c) {
+                if (c == 'r' || c == 'b')
+                    && self.rest.len() > 1
+                    && (self.rest.chars().nth(1).unwrap() == '"'
+                        || self.rest.chars().nth(1).unwrap() == '\'')
+                {
+                    //  r"..."
+                    //  b"..."
+                    self.read();
+                    c = self.peek();
+                    return self.scan_string(c);
+                } else if c == 'r'
+                    && self.rest.len() > 2
+                    && self.rest.chars().nth(1).unwrap() == 'b'
+                    && (self.rest.chars().nth(2).unwrap() == '"'
+                        || self.rest.chars().nth(2).unwrap() == '\'')
+                {
+                    // rb"..."
+                    self.read();
+                    self.read();
+                    c = self.peek();
+                    return self.scan_string(c);
+                }
+
+                while is_ident(c) {
+                    self.read();
+                    c = self.peek()
+                }
+                self.mark_end_token();
+                match KEYWORD_TOKEN.get(&self.token_buf.raw) {
+                    Some(k) => self.token_buf.kind = *k,
+                    _ => self.token_buf.kind = TokenKind::Ident,
+                }
+                return Ok(self.token_buf.clone());
+            }
+
+            // brackets
+            match c {
+                '[' | '(' | '{' => {
+                    self.depth = self.depth + 1;
+                    self.read();
+                    self.mark_end_token();
+
+                    match c {
+                        '[' => {
+                            self.token_buf.kind = TokenKind::LBrack;
+                            return Ok(self.token_buf.clone());
+                        }
+                        '(' => {
+                            self.token_buf.kind = TokenKind::LParen;
+                            return Ok(self.token_buf.clone());
+                        }
+                        '{' => {
+                            self.token_buf.kind = TokenKind::LBrace;
+                            return Ok(self.token_buf.clone());
+                        }
+                        _ => unreachable!()
+                    }
+                }
+                ']' | ')' | '}' => {
+                    if self.depth == 0 {
+                        return Err(anyhow!("{} unexpected '{}'", self.pos, c));
+                    } else {
+                        self.depth = self.depth - 1
+                    }
+                    self.read();
+                    self.mark_end_token();
+                    match c {
+                        ']' => {
+                            self.token_buf.kind = TokenKind::RBrack;
+                            return Ok(self.token_buf.clone());
+                        }
+                        ')' => {
+                            self.token_buf.kind = TokenKind::RParen;
+                            return Ok(self.token_buf.clone());
+                        }
+                        '}' => {
+                            self.token_buf.kind = TokenKind::RBrace;
+                            return Ok(self.token_buf.clone());
+                        }
+                        _ => unreachable!()
+                    }
+                }
+                _ => {}
+            }
+
+            // int or float literal, or period
+            if c.is_ascii_digit() || c == '.' {
+                return self.scan_number(c);
+            }
+
+            break;
         }
-        (
-            TokenKind::Illegal,
-            Position {
-                file: None,
-                line: 0,
-                col: 0,
-            },
-        )
+        return Ok(self.token_buf.clone());
     }
 
-    pub fn scan_string(&mut self, quote: char, prefix: &str) -> Result<(TokenKind, Position), Error> {
-        let start = self.pos;
-        let triple = sc.rest.starts_with(if quote == '\'' {
+    pub fn scan_string(&mut self, quote: char) -> anyhow::Result<TokenValue<'a>> {
+        //let start = self.pos.clone();
+        let triple = self.rest.starts_with(if quote == '\'' {
             TRIPLE_QUOTE
         } else {
             TRIPLE_DOUBLE_QUOTE
         });
-        sc.read();
+        self.read();
 
         // String literals may contain escaped or unescaped newlines,
         // causing them to span multiple lines (gulps) of REPL input;
         // they are the only such token. Thus we cannot call endToken,
-        // as it assumes sc.rest is unchanged since startToken.
+        // as it assumes self.rest is unchanged since startToken.
         // Instead, buffer the token here.
-        let raw: String = "".to_string();
+        let len = self.token.len() - self.rest.len();
 
-        raw.push_str(prefix);
-        // Copy the prefix, e.g. r' or " (see startToken).
-        // TODO
-        // raw.Write(sc.token[:len(sc.token)-len(sc.rest)])
+        // Copy the prefix, e.g. r' or " (see mark_start_token).
+        let mut raw: String = self.token[..len].to_string();
 
         if !triple {
             // single-quoted string literal
             loop {
                 if self.rest.len() == 0 {
-                    return Error(/*val.pos, */"unexpected EOF in string")
+                    return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
                 }
                 let mut c = self.read();
                 //raw.WriteRune(c)
@@ -431,11 +589,11 @@ impl<'a> Scanner<'a> {
                     break;
                 }
                 if c == '\n' {
-                    self.error(val.pos, "unexpected newline in string")
+                    return Err(anyhow!("{:?} unexpected newline in string", self.pos));
                 }
                 if c == '\\' {
-                    if self.eof() {
-                        self.error(val.pos, "unexpected EOF in string")
+                    if self.rest.len() == 0 {
+                        return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
                     }
                     c = self.read();
                     raw.push(c)
@@ -448,41 +606,248 @@ impl<'a> Scanner<'a> {
             self.read();
             raw.push('\'');
 
-            let mut quoteCount = 0;
+            let mut quote_count = 0;
             loop {
-                if self.eof() {
-                    self.error(val.pos, "unexpected EOF in string")
+                if self.rest.len() == 0 {
+                    return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
                 }
                 let mut c = self.read();
-                //raw.WriteRune(c)
+                raw.push(c);
                 if c == '\'' {
-                    quoteCount = quoteCount + 1;
-                    if quoteCount == 3 {
+                    quote_count = quote_count + 1;
+                    if quote_count == 3 {
                         break;
                     }
                 } else {
-                    quoteCount = 0
+                    quote_count = 0
                 }
                 if c == '\\' {
-                    if self.eof() {
-                        self.error(val.pos, "unexpected EOF in string")
+                    if self.rest.len() == 0 {
+                        return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
                     }
                     c = self.read();
                     raw.push(c)
                 }
             }
         }
-        //val.raw = raw.String()
-
-        //s, _, isByte, err := unquote(val.raw)
-        //if err != nil {
-        //	sc.error(start, err.Error())
-        //}
-        //val.string = s
-        if isByte {
-            return TokenKind::Bytes;
+        self.token_buf.raw = raw.to_string();
+        let (s, is_byte) = crate::quote::unquote(&raw)?;
+        self.token_buf.decoded = Some(DecodedValue::String(s.to_string()));
+        self.token_buf.kind = if is_byte {
+            TokenKind::Bytes
         } else {
-            return TokenKind::String;
+            TokenKind::String
+        };
+        return Ok(self.token_buf.clone());
+    }
+
+    pub fn scan_number(&mut self, ch: char) -> anyhow::Result<TokenValue<'a>> {
+        println!("hello {}", ch);
+
+        let mut c = ch;
+        // https://github.com/google/starlark-go/blob/master/doc/spec.md#lexical-elements
+        //
+        // Python features not supported:
+        // - integer literals of >64 bits of precision
+        // - 123L or 123l long suffix
+        // - traditional octal: 0755
+        // https://docs.python.org/2/reference/lexical_analysis.html#integer-and-long-integer-literals
+
+        let start = self.pos.clone();
+        let mut fraction = false;
+        let mut exponent = false;
+        if c == '.' {
+            // dot or start of fraction
+            self.read();
+            c = self.peek();
+            if !c.is_ascii_digit() {
+                self.mark_end_token();
+                self.token_buf.kind = TokenKind::Dot;
+                return Ok(self.token_buf.clone());
+            }
+            fraction = true
+        } else if c == '0' {
+            // hex, octal, binary or float
+            self.read();
+            c = self.peek();
+
+            if c == '.' {
+                fraction = true
+            } else if c == 'x' || c == 'X' {
+                // hex
+                self.read();
+                c = self.peek();
+                if !c.is_digit(16) {
+                    return Err(anyhow!("{} invalid hex literal", start));
+                }
+                while c.is_digit(16) {
+                    self.read();
+                    c = self.peek();
+                }
+            } else if c == 'o' || c == 'O' {
+                // octal
+                self.read();
+                c = self.peek();
+                if !c.is_digit(8) {
+                    return Err(anyhow!("{} invalid octal literal", self.pos));
+                }
+                while c.is_digit(8) {
+                    self.read();
+                    c = self.peek();
+                }
+            } else if c == 'b' || c == 'B' {
+                // binary
+                self.read();
+                c = self.peek();
+                if !c.is_digit(2) {
+                    return Err(anyhow!("{} invalid binary literal ", self.pos));
+                }
+                while c.is_digit(2) {
+                    self.read();
+                    c = self.peek();
+                }
+            } else {
+                // float (or obsolete octal "0755")
+                let mut allzeros = true;
+                let mut octal = true;
+                while c.is_ascii_digit() {
+                    if c != '0' {
+                        allzeros = false
+                    }
+                    if c > '7' {
+                        octal = false
+                    }
+                    self.read();
+                    c = self.peek();
+                }
+                if c == '.' {
+                    fraction = true
+                } else if c == 'e' || c == 'E' {
+                    exponent = true
+                } else if octal && !allzeros {
+                    self.mark_end_token();
+                    return Err(
+                        anyhow!("{} obsolete form of octal literal; use 0o{}", self.pos, &self.token_buf.raw[1..]),
+                    );
+                }
+            }
+        } else {
+            // decimal
+            while c.is_ascii_digit() {
+                self.read();
+                c = self.peek();
+                println!("next: {}", c);
+            }
+
+            if c == '.' {
+                println!("hello flo? {}", c);
+                fraction = true
+            } else if c == 'e' || c == 'E' {
+                exponent = true
+            }
         }
+
+        if fraction {
+            self.read(); // consume '.'
+            c = self.peek();
+            while c.is_ascii_digit() {
+                self.read();
+                c = self.peek();
+            }
+
+            if c == 'e' || c == 'E' {
+                exponent = true
+            }
+        }
+
+        if exponent {
+            self.read(); // consume [eE]
+            c = self.peek();
+            if c == '+' || c == '-' {
+                self.read();
+                c = self.peek();
+                if !c.is_ascii_digit() {
+                    return Err(anyhow!("{} invalid float literal", self.pos));
+                }
+            }
+            while c.is_ascii_digit() {
+                self.read();
+                c = self.peek();
+            }
+        }
+
+        self.mark_end_token();
+        if fraction || exponent {
+            let float_value = self.token.parse::<f64>()?;
+            self.token_buf.kind = TokenKind::Float;           
+            self.token_buf.decoded = Some(DecodedValue::Float(float_value));
+            return Ok(self.token_buf.clone());
+        } else {
+            let s = self.token;
+            if s.len() > 2
+                && s.chars().nth(0).unwrap() == '0'
+                && (s.chars().nth(1).unwrap() == 'o' || s.chars().nth(1).unwrap() == 'O')
+            {
+                let int_value = i64::from_str_radix(&s[2..], 8)?;
+                self.token_buf.decoded = Some(DecodedValue::Int(int_value));
+            } else if s.len() > 2
+                && s.chars().nth(0).unwrap() == '0'
+                && (s.chars().nth(1).unwrap() == 'b' || s.chars().nth(1).unwrap() == 'B')
+            {
+                let int_value = i64::from_str_radix(&s[2..], 2)?;
+                self.token_buf.decoded = Some(DecodedValue::Int(int_value));
+            } else {
+                println!("hello {}", s);
+                match s[2..].parse::<i64>() {
+                    Ok(int_value) => {
+                        self.token_buf.decoded = Some(DecodedValue::Int(int_value));
+                    }
+                    Err(_) => {
+                        let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes(), 10)
+                            .ok_or(anyhow!("could not parse big int"))?;
+                        self.token_buf.decoded = Some(DecodedValue::BigInt(bigint_value));
+                    }
+                }
+            }
+            self.token_buf.kind = TokenKind::Int;
+            return Ok(self.token_buf.clone());
+        }
+    }
+}
+
+fn is_ident_start(c: char) -> bool {
+    use unicode_categories::UnicodeCategories;
+    'a' <= c && c <= 'z' ||
+		'A' <= c && c <= 'Z' ||
+		c == '_' ||
+		c.is_letter()
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_ascii_digit() || is_ident_start(c)
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_basic_scan() -> anyhow::Result<()> {
+        let mut sc = Scanner::new(&"test", "a 123 1.4", false)?;
+        match sc.next_token() {
+            Ok(tok) => assert_eq!(tok.kind, TokenKind::Ident),
+            _ => assert!(false),
+        };
+        match sc.next_token() {
+            Ok(tok) => assert_eq!(tok.kind, TokenKind::Int),
+            _ => assert!(false),
+        };
+        match sc.next_token() {
+            Ok(tok) => assert_eq!(tok.kind, TokenKind::Float),
+            _ => assert!(false),
+        };
+
+        Ok(())
     }
 }
