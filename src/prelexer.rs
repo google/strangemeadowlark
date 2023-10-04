@@ -181,7 +181,7 @@ pub struct TokenValue<'a> {
     decoded: Option<DecodedValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum DecodedValue {
     Int(i64),                   // decoded int
     BigInt(num_bigint::BigInt), // decoded integers > int64
@@ -269,16 +269,18 @@ impl<'a> Scanner<'a> {
     fn mark_end_token(&mut self) {
         let len = self.token.len() - self.rest.len();
         self.token = &self.token[..len];
+        // TODO: only create the string when necessary.
+        self.token_buf.raw = self.token.to_string()
     }
 
     // nextToken is called by the parser to obtain the next input token.
     // It returns the token value and sets val to the data associated with
     // the token.
     //'
-    // For all our input tokens, the associated data is val.pos (the
-    // position where the token begins), val.raw (the input string
-    // corresponding to the token).  For string and int tokens, the string
-    // and int fields additionally contain the token's interpreted value.
+    // For all our input tokens, the associated data is token_buf.pos (the
+    // position where the token begins), token_buf.raw (the input string
+    // corresponding to the token).  For string and int tokens, the decoded
+    // field additionally contains the token's interpreted value.
     pub fn next_token(&mut self) -> anyhow::Result<TokenValue<'a>> {
         'start: loop {
             let mut c: char;
@@ -465,8 +467,10 @@ impl<'a> Scanner<'a> {
             if is_ident_start(c) {
                 if (c == 'r' || c == 'b')
                     && self.rest.len() > 1
-                    && (self.rest.chars().nth(1).unwrap() == '"'
-                        || self.rest.chars().nth(1).unwrap() == '\'')
+                    && ({
+                        let next = self.rest.chars().nth(1).unwrap();
+                        next == '"' || next == '\''
+                    })
                 {
                     //  r"..."
                     //  b"..."
@@ -475,9 +479,10 @@ impl<'a> Scanner<'a> {
                     return self.scan_string(c);
                 } else if c == 'r'
                     && self.rest.len() > 2
-                    && self.rest.chars().nth(1).unwrap() == 'b'
-                    && (self.rest.chars().nth(2).unwrap() == '"'
-                        || self.rest.chars().nth(2).unwrap() == '\'')
+                    && ({
+                        let prefix = &self.rest[..2];
+                        prefix == "b\"" || prefix == "b'"
+                    })
                 {
                     // rb"..."
                     self.read();
@@ -642,8 +647,6 @@ impl<'a> Scanner<'a> {
     }
 
     pub fn scan_number(&mut self, ch: char) -> anyhow::Result<TokenValue<'a>> {
-        println!("hello {}", ch);
-
         let mut c = ch;
         // https://github.com/google/starlark-go/blob/master/doc/spec.md#lexical-elements
         //
@@ -738,11 +741,9 @@ impl<'a> Scanner<'a> {
             while c.is_ascii_digit() {
                 self.read();
                 c = self.peek();
-                println!("next: {}", c);
             }
 
             if c == '.' {
-                println!("hello flo? {}", c);
                 fraction = true
             } else if c == 'e' || c == 'E' {
                 exponent = true
@@ -786,20 +787,19 @@ impl<'a> Scanner<'a> {
             return Ok(self.token_buf.clone());
         } else {
             let s = self.token;
-            if s.len() > 2
-                && s.chars().nth(0).unwrap() == '0'
-                && (s.chars().nth(1).unwrap() == 'o' || s.chars().nth(1).unwrap() == 'O')
-            {
-                let int_value = i64::from_str_radix(&s[2..], 8)?;
-                self.token_buf.decoded = Some(DecodedValue::Int(int_value));
-            } else if s.len() > 2
-                && s.chars().nth(0).unwrap() == '0'
-                && (s.chars().nth(1).unwrap() == 'b' || s.chars().nth(1).unwrap() == 'B')
-            {
-                let int_value = i64::from_str_radix(&s[2..], 2)?;
-                self.token_buf.decoded = Some(DecodedValue::Int(int_value));
-            } else {
-                println!("hello {}", s);
+            'ints: {
+                if s.len() > 2 {
+                    let prefix = &s[..2];
+                    if prefix == "0o" || prefix == "0O" {
+                        let int_value = i64::from_str_radix(&s[2..], 8)?;
+                        self.token_buf.decoded = Some(DecodedValue::Int(int_value));
+                        break 'ints;
+                    } else if prefix == "0b" || prefix == "0B" {
+                        let int_value = i64::from_str_radix(&s[2..], 2)?;
+                        self.token_buf.decoded = Some(DecodedValue::Int(int_value));
+                        break 'ints;
+                    }
+                }
                 match s.parse::<i64>() {
                     Ok(int_value) => {
                         self.token_buf.decoded = Some(DecodedValue::Int(int_value));
@@ -831,37 +831,46 @@ mod tests {
 
     use super::*;
     use float_cmp::approx_eq;
+    use num_bigint::BigInt;
+
+    fn approx_float(tok: &TokenValue, expected: f64) -> bool {
+        match tok.decoded {
+            Some(DecodedValue::Float(float_val)) => {
+                approx_eq!(f64, float_val, expected, ulps = 2)
+            }
+            _ => false,
+        }
+    }
+
+    fn eq_bigint(tok: &TokenValue, expected: &str) -> bool {
+        match &tok.decoded {
+            Some(DecodedValue::BigInt(bigint_val)) => {
+                *bigint_val == BigInt::parse_bytes(expected.as_bytes(), 10).unwrap()
+            }
+            _ => false,
+        }
+    }
 
     #[test]
     fn test_basic_scan() -> anyhow::Result<()> {
-        let mut sc = Scanner::new(&"test", "a 123 1.4", false)?;
-        match sc.next_token() {
-            Ok(tok) => {
-                assert_eq!(tok.kind, TokenKind::Ident);
-            }
-            _ => assert!(false),
-        };
-        match sc.next_token() {
-            Ok(tok) => {
-                assert_eq!(tok.kind, TokenKind::Int);
-                println!("decoded {:?}", tok.decoded);
-                assert!(matches!(tok.decoded, Some(DecodedValue::Int(123))))
-            }
-            _ => assert!(false),
-        };
-        match sc.next_token() {
-            Ok(tok) => {
-                assert_eq!(tok.kind, TokenKind::Float);
-                match tok.decoded {
-                    Some(DecodedValue::Float(float_val)) => {
-                        assert!(approx_eq!(f64, float_val, 1.4, ulps = 2))
-                    }
-                    _ => assert!(false),
+        let cases: phf::Map<&'static str, (TokenKind, fn(TokenValue) -> bool)> = phf_map! [
+        "a" => (TokenKind::Ident, (|tok| {tok.raw == "a"}) ),
+        "abc" => (TokenKind::Ident, (|tok| {tok.raw == "abc"}) ),
+        "0" => (TokenKind::Int, (|tok| {tok.decoded == Some(DecodedValue::Int(0))}) ),
+        "1" => (TokenKind::Int, (|tok| {tok.decoded == Some(DecodedValue::Int(1))}) ),
+        "9223372036854775808" => (TokenKind::Int, (|tok| {eq_bigint(&tok, "9223372036854775808")})),
+        "1.23" => (TokenKind::Float, (|tok| {approx_float(&tok, 1.23)})),
+        ];
+        for (k, v) in cases.into_iter() {
+            let mut sc = Scanner::new(&"test", k, false)?;
+            match sc.next_token() {
+                Ok(tok) => {
+                    assert_eq!(tok.kind, v.0);
+                    assert!(v.1(tok));
                 }
-            }
-            _ => assert!(false),
-        };
-
+                _ => assert!(false),
+            };
+        }
         Ok(())
     }
 }

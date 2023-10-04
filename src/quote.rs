@@ -1,5 +1,4 @@
 #[allow(dead_code)]
-
 use anyhow::anyhow;
 use phf::phf_map;
 
@@ -86,16 +85,14 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
     let mut buf = "".to_string();
     loop {
         // Remove prefix before escape sequence.
-        match quoted
-            .chars()
-            .position(|c| unquote_chars.contains(c))  {
-                Some(i) => {
-                    buf.push_str(&quoted[..i]);
-                    quoted = &quoted[i..];            
-                },
-                _ => {
-                    buf.push_str(quoted);
-                    break
+        match quoted.chars().position(|c| unquote_chars.contains(c)) {
+            Some(i) => {
+                buf.push_str(&quoted[..i]);
+                quoted = &quoted[i..];
+            }
+            _ => {
+                buf.push_str(quoted);
+                break;
             }
         }
 
@@ -210,7 +207,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
         }
     }
 
-    return Ok((buf.to_string(), is_byte))
+    return Ok((buf.to_string(), is_byte));
 }
 
 /*
