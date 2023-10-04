@@ -518,7 +518,7 @@ impl<'a> Scanner<'a> {
                             self.token_buf.kind = TokenKind::LBrace;
                             return Ok(self.token_buf.clone());
                         }
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
                 }
                 ']' | ')' | '}' => {
@@ -542,7 +542,7 @@ impl<'a> Scanner<'a> {
                             self.token_buf.kind = TokenKind::RBrace;
                             return Ok(self.token_buf.clone());
                         }
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
                 }
                 _ => {}
@@ -726,9 +726,11 @@ impl<'a> Scanner<'a> {
                     exponent = true
                 } else if octal && !allzeros {
                     self.mark_end_token();
-                    return Err(
-                        anyhow!("{} obsolete form of octal literal; use 0o{}", self.pos, &self.token_buf.raw[1..]),
-                    );
+                    return Err(anyhow!(
+                        "{} obsolete form of octal literal; use 0o{}",
+                        self.pos,
+                        &self.token_buf.raw[1..]
+                    ));
                 }
             }
         } else {
@@ -779,7 +781,7 @@ impl<'a> Scanner<'a> {
         self.mark_end_token();
         if fraction || exponent {
             let float_value = self.token.parse::<f64>()?;
-            self.token_buf.kind = TokenKind::Float;           
+            self.token_buf.kind = TokenKind::Float;
             self.token_buf.decoded = Some(DecodedValue::Float(float_value));
             return Ok(self.token_buf.clone());
         } else {
@@ -798,7 +800,7 @@ impl<'a> Scanner<'a> {
                 self.token_buf.decoded = Some(DecodedValue::Int(int_value));
             } else {
                 println!("hello {}", s);
-                match s[2..].parse::<i64>() {
+                match s.parse::<i64>() {
                     Ok(int_value) => {
                         self.token_buf.decoded = Some(DecodedValue::Int(int_value));
                     }
@@ -817,10 +819,7 @@ impl<'a> Scanner<'a> {
 
 fn is_ident_start(c: char) -> bool {
     use unicode_categories::UnicodeCategories;
-    'a' <= c && c <= 'z' ||
-		'A' <= c && c <= 'Z' ||
-		c == '_' ||
-		c.is_letter()
+    'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || c == '_' || c.is_letter()
 }
 
 fn is_ident(c: char) -> bool {
@@ -831,20 +830,35 @@ fn is_ident(c: char) -> bool {
 mod tests {
 
     use super::*;
+    use float_cmp::approx_eq;
 
     #[test]
     fn test_basic_scan() -> anyhow::Result<()> {
         let mut sc = Scanner::new(&"test", "a 123 1.4", false)?;
         match sc.next_token() {
-            Ok(tok) => assert_eq!(tok.kind, TokenKind::Ident),
+            Ok(tok) => {
+                assert_eq!(tok.kind, TokenKind::Ident);
+            }
             _ => assert!(false),
         };
         match sc.next_token() {
-            Ok(tok) => assert_eq!(tok.kind, TokenKind::Int),
+            Ok(tok) => {
+                assert_eq!(tok.kind, TokenKind::Int);
+                println!("decoded {:?}", tok.decoded);
+                assert!(matches!(tok.decoded, Some(DecodedValue::Int(123))))
+            }
             _ => assert!(false),
         };
         match sc.next_token() {
-            Ok(tok) => assert_eq!(tok.kind, TokenKind::Float),
+            Ok(tok) => {
+                assert_eq!(tok.kind, TokenKind::Float);
+                match tok.decoded {
+                    Some(DecodedValue::Float(float_val)) => {
+                        assert!(approx_eq!(f64, float_val, 1.4, ulps = 2))
+                    }
+                    _ => assert!(false),
+                }
+            }
             _ => assert!(false),
         };
 
