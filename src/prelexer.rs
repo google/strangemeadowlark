@@ -97,7 +97,7 @@ pub enum TokenKind {
     PipeEq,       // |=
     CaretEq,      // ^=
     LtLtEq,       // <<=
-    GtGtE,        // >>=
+    GtGtEq,       // >>=
     StarStar,     // **
 
     // Keywords
@@ -281,289 +281,492 @@ impl<'a> Scanner<'a> {
     // position where the token begins), token_buf.raw (the input string
     // corresponding to the token).  For string and int tokens, the decoded
     // field additionally contains the token's interpreted value.
+    #[allow(dead_code)]
     pub fn next_token(&mut self) -> anyhow::Result<TokenValue<'a>> {
-        'start: loop {
-            let mut c: char;
+        loop {
+            self.token_buf.kind = TokenKind::Illegal;
+            'start: loop {
+                let mut c: char;
 
-            // Deal with leading spaces and indentation.
-            let mut blank = false;
-            let saved_line_start = self.line_start;
-            if self.line_start {
-                self.line_start = false;
-                let mut col = 0;
-                loop {
-                    c = self.peek();
-                    if c == ' ' {
-                        col = col + 1;
-                        self.read();
-                    } else if c == '\t' {
-                        let tab = 8;
-                        col += (tab - (self.pos.col - 1) % tab) as usize;
-                        self.read();
-                    } else {
-                        break;
+                // Deal with leading spaces and indentation.
+                let mut blank = false;
+                let saved_line_start = self.line_start;
+                if self.line_start {
+                    self.line_start = false;
+                    let mut col = 0;
+                    loop {
+                        c = self.peek();
+                        if c == ' ' {
+                            col = col + 1;
+                            self.read();
+                        } else if c == '\t' {
+                            let tab = 8;
+                            col += (tab - (self.pos.col - 1) % tab) as usize;
+                            self.read();
+                        } else {
+                            break;
+                        }
                     }
-                }
 
-                // The third clause matches EOF.
-                if c == '#' || c == '\n' || c == '\0' {
-                    blank = true
-                }
+                    // The third clause matches EOF.
+                    if c == '#' || c == '\n' || c == '\0' {
+                        blank = true
+                    }
 
-                // Compute indentation level for non-blank lines not
-                // inside an expression.  This is not the common case.
-                if !blank && self.depth == 0 {
-                    let cur = self.indentstk.last().copied().unwrap();
-                    if col > cur {
-                        // indent
+                    // Compute indentation level for non-blank lines not
+                    // inside an expression.  This is not the common case.
+                    if !blank && self.depth == 0 {
+                        let cur = self.indentstk.last().copied().unwrap();
+                        if col > cur {
+                            // indent
+                            self.dents = self.dents + 1;
+                            self.indentstk.push(col)
+                        } else if col < cur {
+                            // outdent(s)
+                            while self.indentstk.len() > 0 && col < *self.indentstk.last().unwrap()
+                            {
+                                self.dents = self.dents - 1;
+                                self.indentstk.pop();
+                            }
+                            if col != *self.indentstk.last().unwrap() {
+                                return Err(anyhow!(
+                                    "{:?} unindent does not match any outer indentation level",
+                                    self.pos
+                                ));
+                            }
+                        }
+                    }
+                } // if self.line_start
+
+                // Return saved indentation tokens.
+                if self.dents != 0 {
+                    if self.dents < 0 {
                         self.dents = self.dents + 1;
-                        self.indentstk.push(col)
-                    } else if col < cur {
-                        // outdent(s)
-                        while self.indentstk.len() > 0 && col < *self.indentstk.last().unwrap() {
-                            self.dents = self.dents - 1;
-                            self.indentstk.pop();
-                        }
-                        if col != *self.indentstk.last().unwrap() {
-                            return Err(anyhow!(
-                                "{:?} unindent does not match any outer indentation level",
-                                self.pos
-                            ));
-                        }
-                    }
-                }
-            } // if self.line_start
-
-            // Return saved indentation tokens.
-            if self.dents != 0 {
-                if self.dents < 0 {
-                    self.dents = self.dents + 1;
-                    self.token_buf.kind = TokenKind::Outdent;
-                    self.token_buf.pos = self.pos.clone();
-                    return Ok(self.token_buf.clone());
-                } else {
-                    self.dents = self.dents - 1;
-                    self.token_buf.kind = TokenKind::Indent;
-                    self.token_buf.pos = self.pos.clone();
-                }
-            }
-
-            // start of line proper
-            c = self.peek();
-
-            // Skip spaces.
-            while c == ' ' || c == '\t' {
-                self.read();
-                c = self.peek()
-            }
-
-            // comment
-            if c == '#' {
-                let comment_pos = self.pos.clone();
-
-                // Consume up to newline (included).
-                while c != '\0' && c != '\n' {
-                    self.read();
-                    c = self.peek()
-                }
-                if self.keep_comments {
-                    self.mark_end_token();
-                    if blank {
-                        self.line_comments.push(Comment {
-                            start: comment_pos,
-                            text: &"(comment)", // TODO
-                        })
-                    } else {
-                        self.suffix_comments.push(Comment {
-                            start: comment_pos,
-                            text: &"(comment)", // TODO
-                        })
-                    }
-                }
-            }
-
-            // newline
-            if c == '\n' {
-                let newline_pos = self.pos.clone();
-                self.line_start = true;
-
-                // Ignore newlines within expressions (common case).
-                if self.depth > 0 {
-                    self.read();
-                    break 'start;
-                }
-
-                // Ignore blank lines.
-                if blank && self.indentstk.len() > 1 {
-                    self.dents = 1 - self.indentstk.len() as i8;
-                    self.indentstk.pop();
-                    break 'start;
-                }
-
-                // At top-level (not in an expression).
-                self.mark_start_token();
-                self.read();
-                self.token_buf.kind = TokenKind::Newline;
-                self.token_buf.pos = newline_pos;
-                self.token_buf.raw = "\n".to_string();
-                return Ok(self.token_buf.clone());
-            }
-
-            // end of file
-            if c == '\0' {
-                // Emit OUTDENTs for unfinished indentation,
-                // preceded by a NEWLINE if we haven't just emitted one.
-                if self.indentstk.len() > 1 {
-                    if saved_line_start {
-                        self.dents = 1 - self.indentstk.len() as i8;
-                        self.indentstk.pop();
-                        break 'start;
-                    } else {
-                        self.line_start = true;
-                        self.mark_start_token();
-                        self.token_buf.kind = TokenKind::Newline;
+                        self.token_buf.kind = TokenKind::Outdent;
                         self.token_buf.pos = self.pos.clone();
-                        self.token_buf.raw = "\n".to_string();
+                        return Ok(self.token_buf.clone());
+                    } else {
+                        self.dents = self.dents - 1;
+                        self.token_buf.kind = TokenKind::Indent;
+                        self.token_buf.pos = self.pos.clone();
                         return Ok(self.token_buf.clone());
                     }
                 }
 
-                self.mark_start_token();
-                self.mark_end_token();
-                self.token_buf.kind = TokenKind::Eof;
-                self.token_buf.pos = self.pos.clone();
-                return Ok(self.token_buf.clone());
-            }
+                // start of line proper
+                c = self.peek();
 
-            // line continuation
-            if c == '\\' {
-                self.read();
-                if self.peek() != '\n' {
-                    // self.errorf(self.pos, "stray backslash in program")
-                    // TODO
-                }
-                self.read();
-                break 'start;
-            }
-
-            // start of the next token
-            self.mark_start_token();
-
-            // comma (common case)
-            if c == ',' {
-                self.read();
-                self.mark_end_token();
-                self.token_buf.kind = TokenKind::Comma;
-                self.token_buf.pos = self.pos.clone();
-                return Ok(self.token_buf.clone());
-            }
-
-            // string literal
-            if c == '"' || c == '\'' {
-                return self.scan_string(c);
-            }
-
-            // identifier or keyword
-            if is_ident_start(c) {
-                if (c == 'r' || c == 'b')
-                    && self.rest.len() > 1
-                    && ({
-                        let next = self.rest.chars().nth(1).unwrap();
-                        next == '"' || next == '\''
-                    })
-                {
-                    //  r"..."
-                    //  b"..."
-                    self.read();
-                    c = self.peek();
-                    return self.scan_string(c);
-                } else if c == 'r'
-                    && self.rest.len() > 2
-                    && ({
-                        let prefix = &self.rest[..2];
-                        prefix == "b\"" || prefix == "b'"
-                    })
-                {
-                    // rb"..."
-                    self.read();
-                    self.read();
-                    c = self.peek();
-                    return self.scan_string(c);
-                }
-
-                while is_ident(c) {
+                // Skip spaces.
+                while c == ' ' || c == '\t' {
                     self.read();
                     c = self.peek()
                 }
-                self.mark_end_token();
-                match KEYWORD_TOKEN.get(&self.token_buf.raw) {
-                    Some(k) => self.token_buf.kind = *k,
-                    _ => self.token_buf.kind = TokenKind::Ident,
-                }
-                return Ok(self.token_buf.clone());
-            }
 
-            // brackets
-            match c {
-                '[' | '(' | '{' => {
-                    self.depth = self.depth + 1;
+                // comment
+                if c == '#' {
+                    let comment_pos = self.pos.clone();
+
+                    // Consume up to newline (included).
+                    while c != '\0' && c != '\n' {
+                        self.read();
+                        c = self.peek()
+                    }
+                    if self.keep_comments {
+                        self.mark_end_token();
+                        if blank {
+                            self.line_comments.push(Comment {
+                                start: comment_pos,
+                                text: &"(comment)", // TODO
+                            })
+                        } else {
+                            self.suffix_comments.push(Comment {
+                                start: comment_pos,
+                                text: &"(comment)", // TODO
+                            })
+                        }
+                    }
+                }
+
+                // newline
+                if c == '\n' {
+                    let newline_pos = self.pos.clone();
+                    self.line_start = true;
+
+                    // Ignore newlines within expressions (common case).
+                    if self.depth > 0 {
+                        self.read();
+                        break 'start;
+                    }
+
+                    // Ignore blank lines.
+                    if blank && self.indentstk.len() > 1 {
+                        self.dents = 1 - self.indentstk.len() as i8;
+                        self.indentstk.pop();
+                        break 'start;
+                    }
+
+                    // At top-level (not in an expression).
+                    self.mark_start_token();
+                    self.read();
+                    self.token_buf.kind = TokenKind::Newline;
+                    self.token_buf.pos = newline_pos;
+                    self.token_buf.raw = "\n".to_string();
+                    return Ok(self.token_buf.clone());
+                }
+
+                // end of file
+                if c == '\0' {
+                    // Emit OUTDENTs for unfinished indentation,
+                    // preceded by a NEWLINE if we haven't just emitted one.
+                    if self.indentstk.len() > 1 {
+                        if saved_line_start {
+                            self.dents = 1 - self.indentstk.len() as i8;
+                            self.indentstk.pop();
+                            break 'start;
+                        } else {
+                            self.line_start = true;
+                            self.mark_start_token();
+                            self.token_buf.kind = TokenKind::Newline;
+                            self.token_buf.pos = self.pos.clone();
+                            self.token_buf.raw = "\n".to_string();
+                            return Ok(self.token_buf.clone());
+                        }
+                    }
+
+                    self.mark_start_token();
+                    self.mark_end_token();
+                    self.token_buf.kind = TokenKind::Eof;
+                    self.token_buf.pos = self.pos.clone();
+                    return Ok(self.token_buf.clone());
+                }
+
+                // line continuation
+                if c == '\\' {
+                    self.read();
+                    if self.peek() != '\n' {
+                        // self.errorf(self.pos, "stray backslash in program")
+                        // TODO
+                    }
+                    self.read();
+                    break 'start;
+                }
+
+                // start of the next token
+                self.mark_start_token();
+
+                // comma (common case)
+                if c == ',' {
                     self.read();
                     self.mark_end_token();
-
-                    match c {
-                        '[' => {
-                            self.token_buf.kind = TokenKind::LBrack;
-                            return Ok(self.token_buf.clone());
-                        }
-                        '(' => {
-                            self.token_buf.kind = TokenKind::LParen;
-                            return Ok(self.token_buf.clone());
-                        }
-                        '{' => {
-                            self.token_buf.kind = TokenKind::LBrace;
-                            return Ok(self.token_buf.clone());
-                        }
-                        _ => unreachable!(),
-                    }
+                    self.token_buf.kind = TokenKind::Comma;
+                    self.token_buf.pos = self.pos.clone();
+                    return Ok(self.token_buf.clone());
                 }
-                ']' | ')' | '}' => {
-                    if self.depth == 0 {
-                        return Err(anyhow!("{} unexpected '{}'", self.pos, c));
-                    } else {
-                        self.depth = self.depth - 1
+
+                // string literal
+                if c == '"' || c == '\'' {
+                    return self.scan_string(c);
+                }
+
+                // identifier or keyword
+                if is_ident_start(c) {
+                    if (c == 'r' || c == 'b')
+                        && self.rest.len() > 1
+                        && ({
+                            let next = self.rest.chars().nth(1).unwrap();
+                            next == '"' || next == '\''
+                        })
+                    {
+                        //  r"..."
+                        //  b"..."
+                        self.read();
+                        c = self.peek();
+                        return self.scan_string(c);
+                    } else if c == 'r'
+                        && self.rest.len() > 2
+                        && ({
+                            let prefix = &self.rest[..2];
+                            prefix == "b\"" || prefix == "b'"
+                        })
+                    {
+                        // rb"..."
+                        self.read();
+                        self.read();
+                        c = self.peek();
+                        return self.scan_string(c);
                     }
-                    self.read();
+
+                    while is_ident(c) {
+                        self.read();
+                        c = self.peek()
+                    }
                     self.mark_end_token();
-                    match c {
-                        ']' => {
-                            self.token_buf.kind = TokenKind::RBrack;
-                            return Ok(self.token_buf.clone());
-                        }
-                        ')' => {
-                            self.token_buf.kind = TokenKind::RParen;
-                            return Ok(self.token_buf.clone());
-                        }
-                        '}' => {
-                            self.token_buf.kind = TokenKind::RBrace;
-                            return Ok(self.token_buf.clone());
-                        }
-                        _ => unreachable!(),
+                    match KEYWORD_TOKEN.get(&self.token_buf.raw) {
+                        Some(k) => self.token_buf.kind = *k,
+                        _ => self.token_buf.kind = TokenKind::Ident,
                     }
+                    return Ok(self.token_buf.clone());
                 }
-                _ => {}
-            }
 
-            // int or float literal, or period
-            if c.is_ascii_digit() || c == '.' {
-                return self.scan_number(c);
-            }
+                // brackets
+                match c {
+                    '[' | '(' | '{' => {
+                        self.depth = self.depth + 1;
+                        self.read();
+                        self.mark_end_token();
 
-            break;
+                        match c {
+                            '[' => {
+                                self.token_buf.kind = TokenKind::LBrack;
+                                return Ok(self.token_buf.clone());
+                            }
+                            '(' => {
+                                self.token_buf.kind = TokenKind::LParen;
+                                return Ok(self.token_buf.clone());
+                            }
+                            '{' => {
+                                self.token_buf.kind = TokenKind::LBrace;
+                                return Ok(self.token_buf.clone());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    ']' | ')' | '}' => {
+                        if self.depth == 0 {
+                            return Err(anyhow!("{} unexpected '{}'", self.pos, c));
+                        } else {
+                            self.depth = self.depth - 1
+                        }
+                        self.read();
+                        self.mark_end_token();
+                        match c {
+                            ']' => {
+                                self.token_buf.kind = TokenKind::RBrack;
+                                return Ok(self.token_buf.clone());
+                            }
+                            ')' => {
+                                self.token_buf.kind = TokenKind::RParen;
+                                return Ok(self.token_buf.clone());
+                            }
+                            '}' => {
+                                self.token_buf.kind = TokenKind::RBrace;
+                                return Ok(self.token_buf.clone());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    _ => {}
+                }
+
+                // int or float literal, or period
+                if c.is_ascii_digit() || c == '.' {
+                    return self.scan_number(c);
+                }
+
+                // other punctuation
+                match c {
+                    '=' | '<' | '>' | '!' | '+' | '-' | '%' | '/' | '&' | '|' | '^' => {
+                        // possibly followed by '='
+                        let start = self.pos.clone();
+                        self.read();
+                        if self.peek() == '=' {
+                            self.read();
+                            match c {
+                                '<' => {
+                                    self.token_buf.kind = TokenKind::Le;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '>' => {
+                                    self.token_buf.kind = TokenKind::Ge;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '=' => {
+                                    self.token_buf.kind = TokenKind::EqEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '!' => {
+                                    self.token_buf.kind = TokenKind::Neq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '+' => {
+                                    self.token_buf.kind = TokenKind::PlusEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '-' => {
+                                    self.token_buf.kind = TokenKind::MinusEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '/' => {
+                                    self.token_buf.kind = TokenKind::SlashEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '%' => {
+                                    self.token_buf.kind = TokenKind::PercentEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '&' => {
+                                    self.token_buf.kind = TokenKind::AmpersandEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '|' => {
+                                    self.token_buf.kind = TokenKind::PipeEq;
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                '^' => {
+                                    self.mark_end_token();
+                                    self.token_buf.kind = TokenKind::CaretEq;
+                                    return Ok(self.token_buf.clone());
+                                }
+                                _ => unreachable!(),
+                            }
+                        } // if '='
+                        match c {
+                            '=' => {
+                                self.token_buf.kind = TokenKind::Eq;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '<' => {
+                                if self.peek() == '<' {
+                                    self.read();
+                                    if self.peek() == '=' {
+                                        self.read();
+                                        self.token_buf.kind = TokenKind::LtLtEq;
+                                    } else {
+                                        self.token_buf.kind = TokenKind::LtLt;
+                                    }
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                self.mark_end_token();
+                                self.token_buf.kind = TokenKind::Lt;
+                                return Ok(self.token_buf.clone());
+                            }
+                            '>' => {
+                                if self.peek() == '>' {
+                                    self.read();
+                                    if self.peek() == '=' {
+                                        self.read();
+                                        self.token_buf.kind = TokenKind::GtGtEq;
+                                    } else {
+                                        self.token_buf.kind = TokenKind::GtGt;
+                                    }
+                                    self.mark_end_token();
+                                    return Ok(self.token_buf.clone());
+                                }
+                                self.token_buf.kind = TokenKind::Gt;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '!' => return Err(anyhow!("{} unexpected input character '!'", start)),
+                            '+' => {
+                                self.token_buf.kind = TokenKind::Plus;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '-' => {
+                                self.token_buf.kind = TokenKind::Minus;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '/' => {
+                                if self.peek() == '/' {
+                                    self.read();
+                                    if self.peek() == '=' {
+                                        self.read();
+                                        self.token_buf.kind = TokenKind::SlashSlashEq;
+                                    } else {
+                                        self.token_buf.kind = TokenKind::SlashSlash;
+                                    }
+                                    return Ok(self.token_buf.clone());
+                                }
+                                self.token_buf.kind = TokenKind::Slash;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '%' => {
+                                self.token_buf.kind = TokenKind::Percent;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '&' => {
+                                self.token_buf.kind = TokenKind::Ampersand;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '|' => {
+                                self.token_buf.kind = TokenKind::Pipe;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '^' => {
+                                self.token_buf.kind = TokenKind::Caret;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            _ => unreachable!(),
+                        } // match c
+                    }
+                    ':' | ';' | '~' => {
+                        // single-char tokens (except comma)
+                        self.read();
+                        match c {
+                            ':' => {
+                                self.token_buf.kind = TokenKind::Colon;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            ';' => {
+                                self.token_buf.kind = TokenKind::Semi;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            '~' => {
+                                self.token_buf.kind = TokenKind::Tilde;
+                                self.mark_end_token();
+                                return Ok(self.token_buf.clone());
+                            }
+                            _ => unreachable!(),
+                        } // match c
+                    }
+
+                    '*' => {
+                        // possibly followed by '*' or '='
+                        self.read();
+                        match self.peek() {
+                            '*' => {
+                                self.read();
+                                self.token_buf.kind = TokenKind::StarStar;
+                                return Ok(self.token_buf.clone());
+                            }
+                            '=' => {
+                                self.read();
+                                self.token_buf.kind = TokenKind::StarEq;
+                                return Ok(self.token_buf.clone());
+                            }
+                            _ => {
+                                self.token_buf.kind = TokenKind::Star;
+                                return Ok(self.token_buf.clone());
+                            }
+                        }
+                    }
+                    _ => return Err(anyhow!("{} unexpected input character {}", self.pos, c)),
+                }
+            }
         }
-        return Ok(self.token_buf.clone());
     }
 
-    pub fn scan_string(&mut self, quote: char) -> anyhow::Result<TokenValue<'a>> {
+    fn scan_string(&mut self, quote: char) -> anyhow::Result<TokenValue<'a>> {
         //let start = self.pos.clone();
         let triple = self.rest.starts_with(if quote == '\'' {
             TRIPLE_QUOTE
@@ -646,7 +849,7 @@ impl<'a> Scanner<'a> {
         return Ok(self.token_buf.clone());
     }
 
-    pub fn scan_number(&mut self, ch: char) -> anyhow::Result<TokenValue<'a>> {
+    fn scan_number(&mut self, ch: char) -> anyhow::Result<TokenValue<'a>> {
         let mut c = ch;
         // https://github.com/google/starlark-go/blob/master/doc/spec.md#lexical-elements
         //
@@ -853,13 +1056,15 @@ mod tests {
 
     #[test]
     fn test_basic_scan() -> anyhow::Result<()> {
+        use TokenKind::*;
         let cases: phf::Map<&'static str, (TokenKind, fn(TokenValue) -> bool)> = phf_map! [
-        "a" => (TokenKind::Ident, (|tok| {tok.raw == "a"}) ),
-        "abc" => (TokenKind::Ident, (|tok| {tok.raw == "abc"}) ),
-        "0" => (TokenKind::Int, (|tok| {tok.decoded == Some(DecodedValue::Int(0))}) ),
-        "1" => (TokenKind::Int, (|tok| {tok.decoded == Some(DecodedValue::Int(1))}) ),
-        "9223372036854775808" => (TokenKind::Int, (|tok| {eq_bigint(&tok, "9223372036854775808")})),
-        "1.23" => (TokenKind::Float, (|tok| {approx_float(&tok, 1.23)})),
+        "a" => (Ident, (|tok| {tok.raw == "a"}) ),
+        "abc" => (Ident, (|tok| {tok.raw == "abc"}) ),
+        "_C4FE" => (Ident, (|tok| {tok.raw == "_C4FE"}) ),
+        "0" => (Int, (|tok| {tok.decoded == Some(DecodedValue::Int(0))}) ),
+        "1" => (Int, (|tok| {tok.decoded == Some(DecodedValue::Int(1))}) ),
+        "9223372036854775808" => (Int, (|tok| {eq_bigint(&tok, "9223372036854775808")})),
+        "1.23" => (Float, (|tok| {approx_float(&tok, 1.23)})),
         ];
         for (k, v) in cases.into_iter() {
             let mut sc = Scanner::new(&"test", k, false)?;
@@ -872,5 +1077,44 @@ mod tests {
             };
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_basic_seq() -> anyhow::Result<()> {
+        use TokenKind::*;
+        let expected: Vec<TokenKind> = vec![LBrace, LParen, LBrack, RBrack, RParen, RBrace, Eof];
+        let mut tokens: Vec<TokenKind> = vec![];
+        let mut sc = Scanner::new(&"test", "{ ( [ ] ) }", false)?;
+        while sc.token_buf.kind != TokenKind::Eof {
+            tokens.push(sc.next_token()?.kind)
+        }
+        assert_eq!(tokens, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_indent_outdent() {
+        use TokenKind::*;
+        let expected: Vec<TokenKind> = vec![
+            Newline, Indent, LBrace, LParen, RParen, RBrace, Newline, Outdent, Eof,
+        ];
+        let mut tokens: Vec<TokenKind> = vec![];
+        let sc = Scanner::new(
+            &"test",
+            "
+        { 
+            ()
+        }",
+            false,
+        );
+        assert!(sc.is_ok());
+        let mut sc = sc.expect("...");
+        while sc.token_buf.kind != TokenKind::Eof {
+            match sc.next_token() {
+                Ok(tok) => tokens.push(tok.kind),
+                _ => assert!(false),
+            }
+        }
+        assert_eq!(tokens, expected);
     }
 }
