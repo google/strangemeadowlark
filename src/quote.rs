@@ -3,17 +3,17 @@ use anyhow::anyhow;
 use phf::phf_map;
 
 // unesc maps single-letter chars following \ to their actual values.
-static UNESC: phf::Map<char, char> = phf_map! {
-    'a' =>  '\x07',
-    'b' =>  '\x08',
-    'f' =>  '\x0C',
-    'n' =>  '\x0A',
-    'r' =>  '\x0D',
-    't' =>  '\x09',
-    'v' =>  '\x0B',
-    '\\' => '\\',
-    '\'' => '\'',
-    '"' =>  '"',
+static UNESC: phf::Map<char, u8> = phf_map! {
+    'a' =>  '\x07' as u8,
+    'b' =>  '\x08' as u8,
+    'f' =>  '\x0C' as u8,
+    'n' =>  '\x0A' as u8,
+    'r' =>  '\x0D' as u8,
+    't' =>  '\x09' as u8,
+    'v' =>  '\x0B' as u8,
+    '\\' => '\\' as u8,
+    '\'' => '\'' as u8,
+    '"' =>  '"' as u8,
 };
 
 /*
@@ -32,10 +32,16 @@ static esc: phf::Map<char, char> = phf_map! {
 };
  */
 
+pub enum DecodedSequence {
+    String(String),
+    Bytes(Vec<u8>),
+}
+
 // unquote unquotes the quoted string, returning the actual
 // string value, whether the original was triple-quoted,
 // whether it was a byte string, and an error describing invalid input.
-pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
+pub fn unquote(quoted_str: &str) -> anyhow::Result<(DecodedSequence)> {
+    println!("unquote {}", quoted_str);
     let mut quoted = quoted_str;
     let mut is_byte = false;
     // Check for raw prefix: means don't interpret the inner \.
@@ -76,29 +82,29 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
     // carriage returns, we're done.
     let unquote_chars = if raw { "\r" } else { "\\\r" };
     if !quoted.chars().any(|x| unquote_chars.contains(x)) {
-        return Ok((quoted.to_string(), false));
+        return Ok(DecodedSequence::String(quoted.to_string()));
     }
 
     // Otherwise process quoted string.
     // Each iteration processes one escape sequence along with the
     // plain text leading up to it.
-    let mut buf = "".to_string();
+    let mut buf: Vec<u8> = vec![];
     loop {
         // Remove prefix before escape sequence.
         match quoted.chars().position(|c| unquote_chars.contains(c)) {
             Some(i) => {
-                buf.push_str(&quoted[..i]);
+                (&quoted[..i]).chars().for_each(|c| buf.push(c as u8));
                 quoted = &quoted[i..];
             }
             _ => {
-                buf.push_str(quoted);
+                quoted.chars().for_each(|c| buf.push(c as u8));
                 break;
             }
         }
 
         // Process carriage return.
         if quoted.chars().nth(0).unwrap() == '\r' {
-            buf.push('\n');
+            buf.push('\n' as u8);
             quoted = if quoted.len() > 1 && quoted.chars().nth(1).unwrap() == '\n' {
                 &quoted[2..]
             } else {
@@ -150,25 +156,30 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
                     // Let's see if we can avoid doing that in BUILD files.
                     return Err(anyhow!("invalid escape sequence \\{:03}o", n));
                 }
-                buf.push(char::from_u32(n).unwrap())
+                buf.push(0 /*char::from_u32(n).unwrap() */) // TODO
             }
             Some('x') => {
                 // Hexadecimal escape, exactly 2 digits, \xXX. [0-127]
                 if quoted.len() < 4 {
                     return Err(anyhow!("truncated escape sequence {}", quoted));
                 }
-                let n = 244; // TODO
-                             //let n, err1 := strconv.ParseUint(quoted[2..4], 16, 0);
-                             //if err1 != nil {
-                             //		err = fmt.Errorf("invalid escape sequence {}", quoted[..4])
-                             //	return
-                             //}
-                if !is_byte && n > 127 {
-                    return Err(anyhow!("non-ASCII hex escape {} (use \\u{:04X} for the UTF-8 encoding of U+{:04x})",
-					&quoted[..4], n, n));
+                match u32::from_str_radix(&quoted[2..4], 16) {
+                    Ok(n) => {
+                        if !is_byte && n > 127 {
+                            return Err(anyhow!("non-ASCII hex escape {} (use \\u{:04X} for the UTF-8 encoding of U+{:04x})",
+                        &quoted[..4], n, n));
+                        }
+                        let decoded_ch = char::from_u32(n);
+                        if decoded_ch.is_none() {
+                            return Err(anyhow!("invalid Unicode code point U{:04x}", n));
+                        }
+                        let mut tmp: [u8; 4] = [0; 4];
+                        let encoded = char::encode_utf8(decoded_ch.unwrap(), &mut tmp);
+                        encoded.as_bytes().into_iter().for_each(|b| buf.push(*b));
+                        quoted = &quoted[4..]
+                    }
+                    _ => return Err(anyhow!("could not parse unicode codepoint {}", quoted)),
                 }
-                buf.push(char::from_u32(n).unwrap());
-                quoted = &quoted[4..]
             }
             Some('u' | 'U') => {
                 // Unicode code point, 4 (\uXXXX) or 8 (\UXXXXXXXX) hex digits.
@@ -179,23 +190,30 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
                 if quoted.len() < sz {
                     return Err(anyhow!("truncated escape sequence {}", quoted));
                 }
-                let n = 255; // TODO
-                             //n, err1 := strconv.ParseUint(quoted[2:sz], 16, 0)
-                             //if err1 != nil {
-                             //	err = fmt.Errorf(`invalid escape sequence %s`, quoted[:sz])
-                             //	return
-                             //}
-                             // if n > unicode.MaxRune {
-                             //	err = fmt.Errorf(`code point out of range: %s (max \U%08x)`,
-                             //		quoted[:sz], n)
-                             //	return
-                             //}
-                             // As in Go, surrogates are disallowed.
-                if 0xD800 <= n && n < 0xE000u32 {
-                    return Err(anyhow!("invalid Unicode code point U{:04x}", n));
+
+                match u32::from_str_radix(&quoted[2..sz], 16) {
+                    Ok(n) => {
+                        if 0xd800u32 <= n && n < 0xe000u32 {
+                            return Err(anyhow!("invalid Unicode code point U{:04x}", n));
+                        }
+                        let decoded_ch = char::from_u32(n);
+                        if decoded_ch.is_none() {
+                            return Err(anyhow!("invalid Unicode code point U{:04x}", n));
+                        }
+                        let mut tmp: [u8; 8] = [0; 8];
+                        let encoded = char::encode_utf8(decoded_ch.unwrap(), &mut tmp); // from_u32(n).unwrap());
+                        encoded.as_bytes().into_iter().for_each(|b| buf.push(*b));
+                        quoted = &quoted[sz..]
+                    }
+                    _ => return Err(anyhow!("failed to parse unicode code point: {}", quoted)),
                 }
-                buf.push(char::from_u32(n).unwrap());
-                quoted = &quoted[sz..]
+
+                // if n > unicode.MaxRune {
+                //	err = fmt.Errorf(`code point out of range: %s (max \U%08x)`,
+                //		quoted[:sz], n)
+                //	return
+                //}
+                // As in Go, surrogates are disallowed.
             }
             _ =>
             // In Starlark, like Go, a backslash must escape something.
@@ -207,94 +225,22 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(String, bool)> {
         }
     }
 
-    return Ok((buf.to_string(), is_byte));
-}
-
-/*
-// indexByte returns the index of the first instance of b in s, or else -1.
-fn indexByte(s: string, b: byte) int {
-    for i := 0; i < len(s); i++ {
-        if s[i] == b {
-            return i
-        }
+    if is_byte {
+        return Ok(DecodedSequence::Bytes(buf));
     }
-    return -1
+
+    let buf_utf8 = String::from_utf8(buf)?;
+    return Ok(DecodedSequence::String(buf_utf8));
 }
 
 // Quote returns a Starlark literal that denotes s.
 // If b, it returns a bytes literal.
-fn Quote(s: string, b: bool) string {
-    const hex = "0123456789abcdef"
-    var runeTmp [utf8.UTFMax]byte
-
-    buf := make([]byte, 0, 3*len(s)/2)
-    if b {
-        buf = append(buf, 'b')
+// Not handling invalid literals.
+pub fn quote(s: &str) -> String {
+    let mut buf = "\"".to_string();
+    for c in s.chars() {
+        c.escape_default().for_each(|c| buf.push(c));
     }
-    buf = append(buf, '"')
-    for width := 0; len(s) > 0; s = s[width:] {
-        r := rune(s[0])
-        width = 1
-        if r >= utf8.RuneSelf {
-            r, width = utf8.DecodeRuneInString(s)
-        }
-        if width == 1 && r == utf8.RuneError {
-            // String (!b) literals accept \xXX escapes only for ASCII,
-            // but we must use them here to represent invalid bytes.
-            // The result is not a legal literal.
-            buf = append(buf, `\x`...)
-            buf = append(buf, hex[s[0]>>4])
-            buf = append(buf, hex[s[0]&0xF])
-            continue
-        }
-        if r == '"' || r == '\\' { // always backslashed
-            buf = append(buf, '\\')
-            buf = append(buf, byte(r))
-            continue
-        }
-        if strconv.IsPrint(r) {
-            n := utf8.EncodeRune(runeTmp[:], r)
-            buf = append(buf, runeTmp[:n]...)
-            continue
-        }
-        switch r {
-        case '\a':
-            buf = append(buf, `\a`...)
-        case '\b':
-            buf = append(buf, `\b`...)
-        case '\f':
-            buf = append(buf, `\f`...)
-        case '\n':
-            buf = append(buf, `\n`...)
-        case '\r':
-            buf = append(buf, `\r`...)
-        case '\t':
-            buf = append(buf, `\t`...)
-        case '\v':
-            buf = append(buf, `\v`...)
-        default:
-            switch {
-            case r < ' ' || r == 0x7f:
-                buf = append(buf, `\x`...)
-                buf = append(buf, hex[byte(r)>>4])
-                buf = append(buf, hex[byte(r)&0xF])
-            case r > utf8.MaxRune:
-                r = 0xFFFD
-                fallthrough
-            case r < 0x10000:
-                buf = append(buf, `\u`...)
-                for s := 12; s >= 0; s -= 4 {
-                    buf = append(buf, hex[r>>uint(s)&0xF])
-                }
-            default:
-                buf = append(buf, `\U`...)
-                for s := 28; s >= 0; s -= 4 {
-                    buf = append(buf, hex[r>>uint(s)&0xF])
-                }
-            }
-        }
-    }
-    buf = append(buf, '"')
-    return string(buf)
+    buf.push('"');
+    return buf
 }
- */
