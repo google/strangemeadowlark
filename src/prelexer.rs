@@ -269,7 +269,6 @@ pub struct TokenValue<'a> {
     kind: Token,
     pos: Position<'a>, // start position of token
     raw: String,       // raw text of token
-    decoded: Option<DecodedValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,7 +306,6 @@ impl<'a> Scanner<'a> {
                 kind: Token::Illegal,
                 raw: "".to_string(),
                 pos: pos.clone(),
-                decoded: None,
             },
         })
     }
@@ -331,7 +329,7 @@ impl<'a> Scanner<'a> {
             return '\0';
         }
         let mut c = self.rest.chars().nth(0).unwrap();
-        self.rest = &self.rest[1..];
+        self.rest = &self.rest[c.len_utf8()..];
 
         if c == '\r' {
             if self.rest.len() > 0 && self.rest.chars().nth(0).unwrap() == '\n' {
@@ -399,7 +397,7 @@ impl<'a> Scanner<'a> {
                         }
                     }
 
-                    // The third clause matches EOF.
+                    // The third clause matches eof.
                     if c == '#' || c == '\n' || c == '\0' {
                         blank = true
                     }
@@ -455,7 +453,6 @@ impl<'a> Scanner<'a> {
 
                 // comment
                 if c == '#' {
-                    println!["hello comment"];
                     let comment_pos = self.pos.clone();
 
                     // Consume up to newline (included).
@@ -477,13 +474,10 @@ impl<'a> Scanner<'a> {
                             })
                         }
                     }
-                    println!["goodbye comment --{}--", &self.token[..(self.token.len() as usize-self.rest.len() as usize) as usize]];
-                    println!["char '{}'", c.escape_default()];
                 }
 
                 // newline
                 if c == '\n' {
-                    println!["hello newline"];
                     let newline_pos = self.pos.clone();
                     self.line_start = true;
 
@@ -494,12 +488,10 @@ impl<'a> Scanner<'a> {
                     }
 
                     // Ignore blank lines.
-                    if blank && self.indentstk.len() > 1 {
-                        self.dents = 1 - self.indentstk.len() as i8;
-                        self.indentstk.pop();
+                    if blank {
+                        self.read();
                         break 'start;
                     }
-
                     // At top-level (not in an expression).
                     self.mark_start_token();
                     self.read();
@@ -880,12 +872,11 @@ impl<'a> Scanner<'a> {
 
         // Copy the prefix, e.g. r' or " (see mark_start_token).
         let mut raw: String = self.token[..len].to_string();
-        println!("raw --{}--", raw);
         if !triple {
             // single-quoted string literal
             loop {
                 if self.rest.len() == 0 {
-                    return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
+                    return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -897,7 +888,7 @@ impl<'a> Scanner<'a> {
                 }
                 if c == '\\' {
                     if self.rest.len() == 0 {
-                        return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
+                        return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                     }
                     c = self.read();
                     raw.push(c)
@@ -913,7 +904,7 @@ impl<'a> Scanner<'a> {
             let mut quote_count = 0;
             loop {
                 if self.rest.len() == 0 {
-                    return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
+                    return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -927,7 +918,7 @@ impl<'a> Scanner<'a> {
                 }
                 if c == '\\' {
                     if self.rest.len() == 0 {
-                        return Err(anyhow!("{:?} unexpected EOF in string", self.pos));
+                        return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                     }
                     c = self.read();
                     raw.push(c)
@@ -1200,35 +1191,99 @@ mod tests {
     }
 
     #[test]
-    fn test_indent_outdent() {
-        //let expected: Vec<Token> = vec![
-        //    Newline, Indent, LBrace, LParen, RParen, RBrace, Newline, Outdent, Eof,
-        //];
-        let expected = "print ( 1 ) newline cc_binary ( name = \"foo\" ) newline def f ( x ) : newline indent return x + 1 newline outdent print ( 1 ) newline eof";
-        let mut tokens = String::new();
-        let sc = Scanner::new(
-            &"test",
-            "# hello
+    fn test_inputs() {
+        let test_cases: Vec<(&str, &str)> = vec![
+            ("", "eof"),
+            ("", "eof"),
+		("123", "123 eof"),
+		("x.y", "x . y eof"),
+		("chocolate.éclair", "chocolate . éclair eof"),
+		("123 \"foo\" hello x.y", "123 \"foo\" hello x . y eof"),
+		("print(x)", "print ( x ) eof"),
+		("print(x); print(y)", "print ( x ) ; print ( y ) eof"),
+        ("/ // /= //= ///=", "/ // /= //= // /= eof"),
+		("# hello
+print(x)", "print ( x ) eof"),
+		("\nprint(\n1\n)\n", "print ( 1 ) newline eof"), // final \n is at toplevel on non-blank line => token
+            ("# hello
 print(1)
 cc_binary(name=\"foo\")
 def f(x):
     return x+1
 print(1)
+", "print ( 1 ) newline cc_binary ( name = \"foo\" ) newline def f ( x ) : newline indent return x + 1 newline outdent print ( 1 ) newline eof"),
+("def f(): pass",
+    "def f ( ) : pass eof"),
+("def f():
+    pass
 ",
-            false,
-        );
-        assert!(sc.is_ok());
-        let mut sc = sc.expect("...");
-        while sc.token_buf.kind != Token::Eof {
-            if !tokens.is_empty() {
-                tokens.push(' ');
+    "def f ( ) : newline indent pass newline outdent eof"),
+("def f():
+    pass
+# oops",
+    "def f ( ) : newline indent pass newline outdent eof"),
+("def f():
+    pass \
+",
+    "def f ( ) : newline indent pass newline outdent eof"),
+("def f():
+    pass
+",
+    "def f ( ) : newline indent pass newline outdent eof"),
+("pass
+
+
+pass", "pass newline pass eof"), // consecutive newlines are consolidated
+("def f():
+    pass
+", "def f ( ) : newline indent pass newline outdent eof"),
+("def f():
+    pass
+
+", "def f ( ) : newline indent pass newline outdent eof"),
+("pass", "pass eof"),
+		("pass\n", "pass newline eof"),
+		("pass\n ", "pass newline eof"),
+		("pass\n \n", "pass newline eof"),
+		("if x:\n  pass\n ", "if x : newline indent pass newline outdent eof"),
+		("x = 1 + \
+2", "x = 1 + 2 eof"),
+		(r#"x = 'a\nb'"#, r#"x = "a\nb" eof"#),
+		(r#"x = r'a\nb'"#, r#"x = "a\\nb" eof"#),
+		("x = 'a\\\nb'", r#"x = "ab" eof"#),
+		(r#"x = '\''"#, r#"x = "'" eof"#),
+		(r#"x = "\"""#, r#"x = "\"" eof"#),
+		(r#"x = r'\''"#, r#"x = "\\'" eof"#),
+		(r#"x = '''\''''"#, r#"x = "'" eof"#),
+		(r#"x = r'''\''''"#, r#"x = "\\'" eof"#),
+		(r#"x = ''''a'b'c'''"#, r#"x = "'a'b'c" eof"#),
+		("x = '''a\nb'''", r#"x = "a\nb" eof"#),
+		("x = '''a\rb'''", r#"x = "a\nb" eof"#),
+		("x = '''a\r\nb'''", r#"x = "a\nb" eof"#),
+		("x = '''a\n\rb'''", r#"x = "a\n\nb" eof"#),
+		("x = r'a\\\nb'", r#"x = "a\\\nb" eof"#),
+		("x = r'a\\\rb'", r#"x = "a\\\nb" eof"#),
+		("x = r'a\\\r\nb'", r#"x = "a\\\nb" eof"#),
+		("a\rb", r#"a newline b eof"#),
+		("a\nb", r#"a newline b eof"#),
+		("a\r\nb", r#"a newline b eof"#),
+		("a\n\nb", r#"a newline b eof"#),
+            ];
+        for (input, want) in test_cases {
+            let mut tokens = "".to_string();
+            let sc = Scanner::new(&"test", input, false);
+            assert!(sc.is_ok());
+            let mut sc = sc.expect("...");
+            while sc.token_buf.kind != Token::Eof {
+                if !tokens.is_empty() {
+                    tokens.push(' ');
+                }
+                match sc.next_token() {
+                    Ok(tok) => tokens.push_str(&format!("{}", tok.kind)),
+                    Err(msg) => assert!(false, "{} {}", msg, input),
+                }
             }
-            match sc.next_token() {
-                Ok(tok) => tokens.push_str(&format!("{}", tok.kind)),
-                Err(msg) => assert!(false, "{}", msg),
-            }
+            assert_eq!(tokens, want, "{}", input);
         }
-        println!("tokens {:?}", tokens);
-        assert_eq!(tokens, expected);
     }
 }

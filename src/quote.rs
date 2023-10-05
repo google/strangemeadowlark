@@ -40,8 +40,7 @@ pub enum DecodedSequence {
 // unquote unquotes the quoted string, returning the actual
 // string value, whether the original was triple-quoted,
 // whether it was a byte string, and an error describing invalid input.
-pub fn unquote(quoted_str: &str) -> anyhow::Result<(DecodedSequence)> {
-    println!("unquote {}", quoted_str);
+pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
     let mut quoted = quoted_str;
     let mut is_byte = false;
     // Check for raw prefix: means don't interpret the inner \.
@@ -193,8 +192,16 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(DecodedSequence)> {
 
                 match u32::from_str_radix(&quoted[2..sz], 16) {
                     Ok(n) => {
+                        // As in Rust, surrogates are disallowed.
                         if 0xd800u32 <= n && n < 0xe000u32 {
                             return Err(anyhow!("invalid Unicode code point U{:04x}", n));
+                        }
+                        if n > 0x10FFFFu32 {
+                            return Err(anyhow!(
+                                "code point out of range: {} (max \\U{:08x})",
+                                &quoted[..sz],
+                                n
+                            ));
                         }
                         let decoded_ch = char::from_u32(n);
                         if decoded_ch.is_none() {
@@ -207,13 +214,6 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(DecodedSequence)> {
                     }
                     _ => return Err(anyhow!("failed to parse unicode code point: {}", quoted)),
                 }
-
-                // if n > unicode.MaxRune {
-                //	err = fmt.Errorf(`code point out of range: %s (max \U%08x)`,
-                //		quoted[:sz], n)
-                //	return
-                //}
-                // As in Go, surrogates are disallowed.
             }
             _ =>
             // In Starlark, like Go, a backslash must escape something.
@@ -239,8 +239,12 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<(DecodedSequence)> {
 pub fn quote(s: &str) -> String {
     let mut buf = "\"".to_string();
     for c in s.chars() {
+        if c == '\'' {
+            buf.push(c);
+            continue;
+        }
         c.escape_default().for_each(|c| buf.push(c));
     }
     buf.push('"');
-    return buf
+    return buf;
 }
