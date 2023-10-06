@@ -1,4 +1,4 @@
-use crate::token::{Token, IntValue, KEYWORD_TOKEN};
+use crate::token::{IntValue, Token, KEYWORD_TOKEN};
 #[allow(dead_code)]
 use anyhow::anyhow;
 use std::{fmt::Display, path::Path};
@@ -66,6 +66,7 @@ const TRIPLE_DOUBLE_QUOTE: &'static str = "\"\"\"";
 impl<'a> Scanner<'a> {
     // The scanner operates on &str, advancing one char at a time.
     // path is only used in error messages.
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(
         path: &'a P,
         data: &'a str,
@@ -768,7 +769,7 @@ impl<'a> Scanner<'a> {
                 self.read();
                 c = self.peek();
                 if !c.is_digit(8) {
-                    return Err(anyhow!("{} invalid octal literal", self.pos));
+                    return Err(anyhow!("{} invalid octal literal", start));
                 }
                 while c.is_digit(8) {
                     self.read();
@@ -779,7 +780,7 @@ impl<'a> Scanner<'a> {
                 self.read();
                 c = self.peek();
                 if !c.is_digit(2) {
-                    return Err(anyhow!("{} invalid binary literal ", self.pos));
+                    return Err(anyhow!("{} invalid binary literal ", start));
                 }
                 while c.is_digit(2) {
                     self.read();
@@ -846,7 +847,7 @@ impl<'a> Scanner<'a> {
                 self.read();
                 c = self.peek();
                 if !c.is_ascii_digit() {
-                    return Err(anyhow!("{} invalid float literal", self.pos));
+                    return Err(anyhow!("{} invalid float literal", start));
                 }
             }
             while c.is_ascii_digit() {
@@ -862,36 +863,55 @@ impl<'a> Scanner<'a> {
             return Ok(());
         } else {
             let s = self.token;
-            'ints: {
-                if s.len() > 2 {
-                    let prefix = &s[..2];
-                    if prefix == "0o" || prefix == "0O" {
+            if s.len() > 2 {
+                match &s[..2] {
+                    "0o" | "0O" => {
                         let int_value = i64::from_str_radix(&s[2..], 8)?;
                         self.token_buf.kind = Token::Int {
                             decoded: IntValue::Int(int_value),
                         };
-                        break 'ints;
-                    } else if prefix == "0b" || prefix == "0B" {
+                        return Ok(());
+                    }
+                    "0b" | "0B" => {
                         let int_value = i64::from_str_radix(&s[2..], 2)?;
                         self.token_buf.kind = Token::Int {
                             decoded: IntValue::Int(int_value),
                         };
-                        break 'ints;
+                        return Ok(());
                     }
+                    "0x" | "0X" => match i64::from_str_radix(&s[2..], 16) {
+                        Ok(int_value) => {
+                            self.token_buf.kind = Token::Int {
+                                decoded: IntValue::Int(int_value),
+                            };
+                            return Ok(());
+                        }
+                        _ => {
+                            let bigint_value =
+                                num_bigint::BigInt::parse_bytes(&s[2..].as_bytes(), 16)
+                                    .ok_or(anyhow!("{} could not parse hex big int", start))?;
+                            self.token_buf.kind = Token::Int {
+                                decoded: IntValue::BigInt(bigint_value),
+                            };
+                            return Ok(());
+                        }
+                    },
+
+                    _ => { /* decimal handled below */ }
                 }
-                match s.parse::<i64>() {
-                    Ok(int_value) => {
-                        self.token_buf.kind = Token::Int {
-                            decoded: IntValue::Int(int_value),
-                        };
-                    }
-                    Err(_) => {
-                        let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes(), 10)
-                            .ok_or(anyhow!("could not parse big int"))?;
-                        self.token_buf.kind = Token::Int {
-                            decoded: IntValue::BigInt(bigint_value),
-                        };
-                    }
+            }
+            match s.parse::<i64>() {
+                Ok(int_value) => {
+                    self.token_buf.kind = Token::Int {
+                        decoded: IntValue::Int(int_value),
+                    };
+                }
+                _ => {
+                    let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes(), 10)
+                        .ok_or(anyhow!("{} could not parse big int", start))?;
+                    self.token_buf.kind = Token::Int {
+                        decoded: IntValue::BigInt(bigint_value),
+                    };
                 }
             }
             return Ok(());
@@ -912,51 +932,6 @@ fn is_ident(c: char) -> bool {
 mod tests {
 
     use super::*;
-    use float_cmp::approx_eq;
-    use num_bigint::BigInt;
-    /*
-       fn approx_float(tok: &TokenValue, expected: f64) -> bool {
-           match tok.decoded {
-               Some(DecodedValue::Float(float_val)) => {
-                   approx_eq!(f64, float_val, expected, ulps = 2)
-               }
-               _ => false,
-           }
-       }
-
-       fn eq_bigint(tok: &TokenValue, expected: &str) -> bool {
-           match &tok.decoded {
-               Some(DecodedValue::BigInt(bigint_val)) => {
-                   *bigint_val == BigInt::parse_bytes(expected.as_bytes(), 10).unwrap()
-               }
-               _ => false,
-           }
-       }
-       #[test]
-       fn test_basic_scan() -> anyhow::Result<()> {
-           use Token::*;
-           let cases: phf::Map<&'static str, (Token, fn(TokenValue) -> bool)> = phf_map! [
-           //"a" => (Ident, (|tok| {tok.raw == "a"}) ),
-           //"abc" => (Ident, (|tok| {tok.raw == "abc"}) ),
-           //"_C4FE" => (Ident, (|tok| {tok.raw == "_C4FE"}) ),
-           "0" => (Int, (|tok| {tok.decoded == Some(DecodedValue::Int(0))}) ),
-           "1" => (Int, (|tok| {tok.decoded == Some(DecodedValue::Int(1))}) ),
-           "9223372036854775808" => (Int, (|tok| {eq_bigint(&tok, "9223372036854775808")})),
-           "1.23" => (Float, (|tok| {approx_float(&tok, 1.23)})),
-           ];
-           for (k, v) in cases.into_iter() {
-               let mut sc = Scanner::new(&"test", k, false)?;
-               match sc.next_token() {
-                   Ok(tok) => {
-                       assert_eq!(tok.kind, v.0);
-                       assert!(v.1(tok));
-                   }
-                   _ => assert!(false),
-               };
-           }
-           Ok(())
-       }
-    */
 
     #[test]
     fn test_basic_seq() -> anyhow::Result<()> {
@@ -977,6 +952,11 @@ mod tests {
             ("", "eof"),
             ("", "eof"),
 		("123", "123 eof"),
+        ("0", "0 eof"),
+        ("1", "1 eof"),
+        ("0x0a", "10 eof"),
+        ("9223372036854775808", "9223372036854775808 eof"),
+        ("1.23", "1.23 eof"),
 		("x.y", "x . y eof"),
 		("chocolate.éclair", "chocolate . éclair eof"),
 		("123 \"foo\" hello x.y", "123 \"foo\" hello x . y eof"),
