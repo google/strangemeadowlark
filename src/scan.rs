@@ -6,7 +6,7 @@ use std::{fmt::Display, path::Path};
 // A Position describes the location of a rune of input.
 #[derive(Clone, Debug)]
 pub struct Position<'a> {
-    pub path: &'a Path, // filename (indirect for compactness)
+    pub path: &'a Path, // path to file (only for error messages)
     pub line: u32,      // 1-based line number; 0 if line unknown
     pub col: u32,       // 1-based column (rune) number; 0 if column unknown
 }
@@ -36,7 +36,7 @@ impl<'a> Position<'a> {
 // A Comment represents a single # comment.
 pub struct Comment<'a> {
     pub start: Position<'a>,
-    pub text: &'a str, // without trailing newline
+    pub text: String, // without trailing newline
 }
 
 pub struct Scanner<'a> {
@@ -247,12 +247,12 @@ impl<'a> Scanner<'a> {
                         if blank {
                             self.line_comments.push(Comment {
                                 start: comment_pos,
-                                text: &"(comment)", // TODO
+                                text: self.token_buf.raw.clone()
                             })
                         } else {
                             self.suffix_comments.push(Comment {
                                 start: comment_pos,
-                                text: &"(comment)", // TODO
+                                text: self.token_buf.raw.clone(),
                             })
                         }
                     }
