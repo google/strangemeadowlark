@@ -1,32 +1,33 @@
 use crate::token::{IntValue, Token, KEYWORD_TOKEN};
 #[allow(dead_code)]
 use anyhow::anyhow;
-use std::{fmt::Display, path::Path};
+use std::{fmt::Display, path::Path, rc::Rc};
 
 // A Position describes the location of a rune of input.
 #[derive(Clone, Debug)]
-pub struct Position<'a> {
-    pub path: &'a Path, // path to file (only for error messages)
-    pub line: u32,      // 1-based line number; 0 if line unknown
-    pub col: u32,       // 1-based column (rune) number; 0 if column unknown
+pub struct Position {
+    pub path: Rc<String>,
+    //pub path: &'a Path, // path to file (only for error messages)
+    pub line: u32, // 1-based line number; 0 if line unknown
+    pub col: u32,  // 1-based column (rune) number; 0 if column unknown
 }
 
-impl<'a> Display for Position<'a> {
+impl<'a> Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}:{}:{}",
-            self.path.to_string_lossy(),
+            "{}:{}",
+            //self.path.to_string_lossy(),
             self.line,
             self.col
         )
     }
 }
 
-impl<'a> Position<'a> {
-    pub fn new(path: &'a Path) -> Position<'a> {
+impl Position {
+    pub fn new(path: &Rc<String>) -> Position {
         Position {
-            path,
+            path: Rc::clone(path),
             line: 1,
             col: 1,
         }
@@ -34,30 +35,30 @@ impl<'a> Position<'a> {
 }
 
 // A Comment represents a single # comment.
-pub struct Comment<'a> {
-    pub start: Position<'a>,
+pub struct Comment {
+    pub start: Position,
     pub text: String, // without trailing newline
 }
 
 pub struct Scanner<'a> {
     rest: &'a str,
-    token: &'a str,                    //  slice with current token
-    pos: Position<'a>,                 // current input position
-    depth: usize,                      // nesting of [ ] { } ( )
-    indentstk: Vec<usize>,             // stack of indentation levels
-    dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
-    line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
-    keep_comments: bool, // accumulate comments in slice
-    line_comments: Vec<Comment<'a>>, // list of full line comments (if keepComments)
-    suffix_comments: Vec<Comment<'a>>, // list of suffix comments (if keepComments)
-    token_buf: TokenValue<'a>,
+    token: &'a str,                //  slice with current token
+    pub pos: Position,             // current input position
+    depth: usize,                  // nesting of [ ] { } ( )
+    indentstk: Vec<usize>,         // stack of indentation levels
+    dents: i8,                     // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
+    line_start: bool,              // after NEWLINE; convert spaces to indentation tokens
+    keep_comments: bool,           // accumulate comments in slice
+    line_comments: Vec<Comment>,   // list of full line comments (if keepComments)
+    suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
+    pub token_buf: TokenValue,
 }
 
 #[derive(Clone, Debug)]
-pub struct TokenValue<'a> {
-    kind: Token,
-    pos: Position<'a>, // start position of token
-    raw: String,       // raw text of token
+pub struct TokenValue {
+    pub kind: Token,
+    pub pos: Position, // start position of token
+    pub raw: String,   // raw text of token
 }
 
 const TRIPLE_QUOTE: &'static str = "'''";
@@ -72,9 +73,15 @@ impl<'a> Scanner<'a> {
         data: &'a str,
         keep_comments: bool,
     ) -> anyhow::Result<Scanner<'a>> {
-        let pos = Position::new(path.clone().as_ref());
+        let path_str = path
+            .as_ref()
+            .to_str()
+            .ok_or(anyhow!("not utf"))?
+            .to_string();
+        let path = Rc::new(path_str);
+        //let pos = Position::new();//path.as_ref());
         Ok(Scanner {
-            pos: pos.clone(),
+            pos: Position::new(&path),
             indentstk: vec![0],
             line_start: true,
             keep_comments,
@@ -87,7 +94,7 @@ impl<'a> Scanner<'a> {
             token_buf: TokenValue {
                 kind: Token::Illegal,
                 raw: "".to_string(),
-                pos: pos.clone(),
+                pos: Position::new(&path),
             },
         })
     }
@@ -149,11 +156,11 @@ impl<'a> Scanner<'a> {
     // corresponding to the token).  For string and int tokens, the decoded
     // field additionally contains the token's interpreted value.
     #[allow(dead_code)]
-    pub fn next_token(&mut self) -> anyhow::Result<TokenValue<'a>> {
+    pub fn next_token(&mut self) -> anyhow::Result<TokenValue> {
         self.next_token_internal().map(|()| self.token_buf.clone())
     }
 
-    fn next_token_internal(&mut self) -> anyhow::Result<()> {
+    pub fn next_token_internal(&mut self) -> anyhow::Result<()> {
         loop {
             self.token_buf.kind = Token::Illegal;
             'start: loop {
@@ -247,7 +254,7 @@ impl<'a> Scanner<'a> {
                         if blank {
                             self.line_comments.push(Comment {
                                 start: comment_pos,
-                                text: self.token_buf.raw.clone()
+                                text: self.token_buf.raw.clone(),
                             })
                         } else {
                             self.suffix_comments.push(Comment {
