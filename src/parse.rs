@@ -34,27 +34,27 @@ pub fn parse<'b, P: AsRef<Path>>(
     src: &'b str,
     mode: Mode,
 ) -> Result<&'b FileUnit<'b>> {
-    let mut sc = &mut Scanner::new(path, src, mode & RETAIN_COMMENTS != 0)?;
-    sc.next_token_internal()?;
-    let p = &mut ParserData {
-        tok: sc.token_buf.clone(), // read first lookahead token
-        pos: sc.pos.clone(),
-    };
+    let mut sc = Scanner::new(path, src, mode & RETAIN_COMMENTS != 0)?;
+    // Read first lookahead token.
+    let tok = sc.next_token()?;
+    let pos = sc.pos.clone();
+    let p = &mut Parser { sc, tok, pos };
 
-    let f: &'b FileUnit<'b> = p.parse_file(sc, bump, path.as_ref())?;
+    let f: &'b FileUnit<'b> = p.parse_file(bump, path.as_ref())?;
     //p.assign_comments(f)?;
     Ok(f)
 }
 
-struct ParserData {
+struct Parser<'a> {
+    sc: Scanner<'a>,
     tok: TokenValue,
     pos: Position,
 }
 
-impl ParserData {
-    fn next_token(&mut self, sc: &mut Scanner) -> Result<Position> {
-        let old_pos = sc.pos.clone();
-        self.tok = sc.next_token()?;
+impl<'a> Parser<'a> {
+    fn next_token(&mut self) -> Result<Position> {
+        let old_pos = self.sc.pos.clone();
+        self.tok = self.sc.next_token()?;
         self.pos = old_pos;
         // enable to see the token stream
         if DEBUG {
@@ -63,7 +63,7 @@ impl ParserData {
         return Ok(self.pos.clone());
     }
 
-    fn consume<'a>(&mut self, sc: &mut Scanner, expected: Token) -> Result<Position> {
+    fn consume(&mut self, expected: Token) -> Result<Position> {
         if self.tok.kind != expected {
             return Err(anyhow!(
                 "{} got {}, want {}",
@@ -72,27 +72,22 @@ impl ParserData {
                 expected
             ));
         }
-        self.next_token(sc)
+        self.next_token()
     }
 
     // file_input = (NEWLINE | stmt)* EOF
-    fn parse_file<'a, 'b>(
-        &mut self,
-        sc: &mut Scanner,
-        bump: &'b Bump,
-        path: &'b Path,
-    ) -> Result<&'b FileUnit<'b>>
+    fn parse_file<'b>(&mut self, bump: &'b Bump, path: &'b Path) -> Result<&'b FileUnit<'b>>
     where
         'b: 'a,
     {
         let mut stmts: Vec<&'b Stmt<'b>> = vec![];
         while self.tok.kind != Token::Eof {
             if self.tok.kind == Token::Newline {
-                self.next_token(sc)?;
+                self.next_token()?;
                 continue;
             }
             {
-                let _ = self.parse_stmt(sc, bump, &mut stmts)?;
+                let _ = self.parse_stmt(bump, &mut stmts)?;
             }
         }
         let f = bump.alloc(FileUnit {
@@ -102,34 +97,29 @@ impl ParserData {
         return Ok(f);
     }
 
-    fn parse_stmt<'b>(
-        &mut self,
-        sc: &mut Scanner,
-        bump: &'b Bump,
-        stmts: &mut Vec<&'b Stmt<'b>>,
-    ) -> Result<()> {
+    fn parse_stmt<'b>(&mut self, bump: &'b Bump, stmts: &mut Vec<&'b Stmt<'b>>) -> Result<()> {
         match self.tok.kind {
-            Token::Def => stmts.push(self.parse_def_stmt(sc, bump)?),
-            Token::If => stmts.push(self.parse_if_stmt(sc, bump)?),
-            Token::For => stmts.push(self.parse_for_stmt(sc, bump)?),
-            Token::While => stmts.push(self.parse_while_stmt(sc, bump)?),
+            Token::Def => stmts.push(self.parse_def_stmt(bump)?),
+            Token::If => stmts.push(self.parse_if_stmt(bump)?),
+            Token::For => stmts.push(self.parse_for_stmt(bump)?),
+            Token::While => stmts.push(self.parse_while_stmt(bump)?),
             _ => return self.parse_simple_stmt(bump, stmts, true),
         }
         return Ok(());
     }
 
-    fn parse_def_stmt<'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
-        self.next_token(sc)?; // consume DEF
+    fn parse_def_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+        self.next_token()?; // consume DEF
         let def_pos = self.pos.clone();
-        let id = self.parse_ident(sc, bump)?;
-        self.consume(sc, Token::LParen)?;
+        let id = self.parse_ident(bump)?;
+        self.consume(Token::LParen)?;
         let lparen: Position = self.pos.clone();
-        let params = self.parse_params(sc, bump)?;
+        let params = self.parse_params(bump)?;
         let params = bump.alloc_slice_copy(&params.into_boxed_slice());
-        self.consume(sc, Token::RParen)?;
+        self.consume(Token::RParen)?;
         let rparen = self.pos.clone();
-        self.consume(sc, Token::Colon)?;
-        let body = self.parse_suite(sc, bump)?;
+        self.consume(Token::Colon)?;
+        let body = self.parse_suite(bump)?;
         let body = bump.alloc_slice_copy(&body.into_boxed_slice());
         let stmt: &'b mut Stmt<'b> = bump.alloc(Stmt {
             span: Span {
@@ -148,12 +138,12 @@ impl ParserData {
         return Ok(stmt);
     }
 
-    fn parse_if_stmt<'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
-        self.next_token(sc)?;
+    fn parse_if_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+        self.next_token()?;
         let if_pos = self.pos.clone(); // consume IF
-        let cond = self.parse_test(sc, bump)?;
-        self.consume(sc, Token::Colon)?;
-        let body = self.parse_suite(sc, bump)?;
+        let cond = self.parse_test(bump)?;
+        self.consume(Token::Colon)?;
+        let body = self.parse_suite(bump)?;
         let if_stmt = bump.alloc(Stmt {
             span: Span {
                 start: if_pos.clone(),
@@ -170,11 +160,11 @@ impl ParserData {
         // Collect "elif" statements and connect them later.
         let mut elifs = vec![];
         while self.tok.kind == Token::Elif {
-            self.next_token(sc)?;
+            self.next_token()?;
             let elif_pos = self.pos.clone(); // consume ELIF
-            let cond = self.parse_test(sc, bump)?;
-            self.consume(sc, Token::Colon)?;
-            let body = self.parse_suite(sc, bump)?;
+            let cond = self.parse_test(bump)?;
+            self.consume(Token::Colon)?;
+            let body = self.parse_suite(bump)?;
             elifs.push(bump.alloc(Stmt {
                 span: Span {
                     start: elif_pos.clone(),
@@ -231,9 +221,9 @@ impl ParserData {
                         },
                     ..
                 } => {
-                    *else_pos = Some(self.next_token(sc)?); // consume ELSE
-                    self.consume(sc, Token::Colon)?;
-                    *else_arm = self.parse_suite(sc, bump)?
+                    *else_pos = Some(self.next_token()?); // consume ELSE
+                    self.consume(Token::Colon)?;
+                    *else_arm = self.parse_suite(bump)?
                 }
                 _ => unreachable!(),
             }
@@ -241,39 +231,31 @@ impl ParserData {
         return Ok(if_stmt);
     }
 
-    fn parse_for_stmt<'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+    fn parse_for_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
         todo!()
     }
 
-    fn parse_while_stmt<'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+    fn parse_while_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
         todo!()
     }
 
-    fn parse_test<'a, 'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Expr<'b>> {
+    fn parse_test<'b>(&mut self, bump: &'b Bump) -> Result<&'b Expr<'b>> {
         todo!()
     }
 
-    fn parse_suite<'a, 'b>(
-        &mut self,
-        sc: &mut Scanner,
-        bump: &'b Bump,
-    ) -> Result<Vec<&'b Stmt<'b>>> {
+    fn parse_suite<'b>(&mut self, bump: &'b Bump) -> Result<Vec<&'b Stmt<'b>>> {
         todo!()
     }
 
-    fn parse_ident<'a, 'b>(&mut self, sc: &mut Scanner, bump: &'b Bump) -> Result<&'b Ident> {
+    fn parse_ident<'b>(&mut self, bump: &'b Bump) -> Result<&'b Ident> {
         todo!()
     }
 
-    fn parse_params<'a, 'b>(
-        &mut self,
-        sc: &mut Scanner,
-        bump: &'b Bump,
-    ) -> Result<Vec<&'b Expr<'b>>> {
+    fn parse_params<'b>(&mut self, bump: &'b Bump) -> Result<Vec<&'b Expr<'b>>> {
         todo!();
     }
 
-    fn parse_simple_stmt<'a, 'b>(
+    fn parse_simple_stmt<'b>(
         &mut self,
         bump: &'b Bump,
         stmts: &mut Vec<&'b Stmt<'b>>,
