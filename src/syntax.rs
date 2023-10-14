@@ -84,19 +84,19 @@ pub enum StmtData<'a> {
         for_pos: Position,
         vars: &'a Expr<'a>, // name, or tuple of names
         x: &'a Expr<'a>,
-        body: Vec<&'a Stmt<'a>>,
+        body: &'a [&'a Stmt<'a>],
     },
     WhileStmt {
         while_pos: Position,
         cond: &'a Expr<'a>,
-        body: Vec<&'a Stmt<'a>>,
+        body: &'a [&'a Stmt<'a>],
     },
     IfStmt {
         if_pos: Position, // IF or ELIF
         cond: &'a Expr<'a>,
-        then_arm: Vec<&'a Stmt<'a>>,
-        else_pos: Option<Position>,  // ELSE or ELIF
-        else_arm: Vec<&'a Stmt<'a>>, // optional
+        then_arm: &'a [&'a Stmt<'a>],
+        else_pos: Option<Position>,   // ELSE or ELIF
+        else_arm: &'a [&'a Stmt<'a>], // optional
     },
     LoadStmt {
         load_pos: Position,
@@ -112,6 +112,7 @@ pub enum StmtData<'a> {
 }
 
 pub struct Expr<'a> {
+    pub span: Span,
     pub data: ExprData<'a>,
 }
 
@@ -125,7 +126,7 @@ pub enum ExprData<'a> {
     CallExpr {
         func: &'a Expr<'a>,
         lparen: Position,
-        args: Vec<&'a Expr<'a>>, // arg = expr | ident=expr | *expr | **expr
+        args: &'a [&'a Expr<'a>], // arg = expr | ident=expr | *expr | **expr
         rparen: Position,
     },
     /// A Comprehension represents a list or dict comprehension:
@@ -134,7 +135,7 @@ pub enum ExprData<'a> {
         curly: bool, // {x:y for ...} or {x for ...}, not [x for ...]
         lbrack_pos: Position,
         body: &'a Expr<'a>,
-        clauses: Vec<&'a Clause<'a>>,
+        clauses: &'a [&'a Clause<'a>],
         rbrack_pos: Position,
     },
     CondExpr {
@@ -150,9 +151,9 @@ pub enum ExprData<'a> {
         value: &'a Expr<'a>,
     },
     DictExpr {
-        lbrace_pos: Position,
-        list: Vec<&'a Expr<'a>>, // all *DictEntrys
-        rbrace_pos: Position,
+        lbrace: Position,
+        list: &'a [&'a Expr<'a>], // all *DictEntrys
+        rbrace: Position,
     },
     DotExpr {
         x: &'a Expr<'a>,
@@ -163,19 +164,19 @@ pub enum ExprData<'a> {
     Ident(&'a Ident),
     IndexExpr {
         x: &'a Expr<'a>,
-        lbrack_pos: Position,
+        lbrack: Position,
         y: &'a Expr<'a>,
-        rbrack_pos: Position,
+        rbrack: Position,
     },
     LambdaExpr {
         lambda_pos: Position,
         // param = ident | ident=expr | * | *ident | **ident
-        params: Vec<&'a Expr<'a>>,
+        params: &'a [&'a Expr<'a>],
         body: &'a Expr<'a>,
     },
     ListExpr {
-        lbrack_pos: Position,
-        list: Vec<&'a Expr<'a>>,
+        lbrack: Position,
+        list: &'a [&'a Expr<'a>],
         rbrack: Position,
     },
     Literal {
@@ -190,16 +191,16 @@ pub enum ExprData<'a> {
     },
     SliceExpr {
         x: &'a Expr<'a>,
-        lbrack: &'a Position,
+        lbrack: Position,
         lo: Option<&'a Expr<'a>>,
         hi: Option<&'a Expr<'a>>,
         step: Option<&'a Expr<'a>>,
-        rbrack_pos: Position,
+        rbrack: Position,
     },
     TupleExpr {
-        lparen: Position, // optional (e.g. in x, y = 0, 1), but required if List is empty
-        list: Vec<&'a Expr<'a>>,
-        rparen: Position,
+        lparen: Option<Position>, // optional (e.g. in x, y = 0, 1), but required if List is empty
+        list: &'a [&'a Expr<'a>],
+        rparen: Option<Position>,
     },
     UnaryExpr {
         op_pos: Position,
@@ -208,9 +209,22 @@ pub enum ExprData<'a> {
     },
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ident {
     pub name_pos: Position,
     pub name: String,
+}
+
+impl Ident {
+    pub fn as_expr<'a>(&'a self) -> Expr<'a> {
+        Expr {
+            span: Span {
+                start: self.name_pos,
+                end: self.name_pos,
+            },
+            data: ExprData::Ident(self),
+        }
+    }
 }
 
 pub enum Clause<'a> {

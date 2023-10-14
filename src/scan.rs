@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use std::{fmt::Display, path::Path, rc::Rc};
 
 // A Position describes the location of a rune of input.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Position {
     pub path: Rc<String>,
     //pub path: &'a Path, // path to file (only for error messages)

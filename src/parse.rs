@@ -29,36 +29,45 @@ const RETAIN_COMMENTS: Mode = 1; // retain comments in AST; see Node.Comments
 // []byte, io.Reader, or FilePortion.
 // If src == nil, Parse parses the file specified by filename.
 pub fn parse<'b, P: AsRef<Path>>(
-    bump: &'b mut Bump,
+    bump: &'b Bump,
     path: &'b P,
     src: &'b str,
     mode: Mode,
 ) -> Result<&'b FileUnit<'b>> {
-    let mut sc = Scanner::new(path, src, mode & RETAIN_COMMENTS != 0)?;
-    // Read first lookahead token.
-    let tok = sc.next_token()?;
-    let pos = sc.pos.clone();
-    let p = &mut Parser { sc, tok, pos };
-
-    let f: &'b FileUnit<'b> = p.parse_file(bump, path.as_ref())?;
+    let mut p = Parser::new(bump, path, src, mode)?;
+    let f: &'b FileUnit<'b> = p.parse_file(path.as_ref())?;
     //p.assign_comments(f)?;
     Ok(f)
 }
 
-struct Parser<'a> {
+struct Parser<'a, 'b>
+where
+    'b: 'a,
+{
     sc: Scanner<'a>,
     tok: TokenValue,
     pos: Position,
+    bump: &'b Bump,
 }
 
-impl<'a> Parser<'a> {
+impl<'a, 'b> Parser<'a, 'b> {
+    fn new<P: AsRef<Path>>(bump: &'b Bump, path: &'b P, src: &'b str, mode: Mode) -> Result<Self> {
+        let mut sc = Scanner::new(path, src, mode & RETAIN_COMMENTS != 0)?;
+        // Read first lookahead token.
+        let tok = sc.next_token()?;
+        let pos = sc.pos.clone();
+        Ok(Parser { sc, tok, pos, bump })
+    }
+
+    // next_token advances the scanner and returns the position of the
+    // previous token.
     fn next_token(&mut self) -> Result<Position> {
         let old_pos = self.sc.pos.clone();
         self.tok = self.sc.next_token()?;
         self.pos = old_pos;
         // enable to see the token stream
         if DEBUG {
-            //	log.Printf("nextToken: %-20s%+v\n", p.tok, p.tokval.pos)
+            //	log.Printf("next_token: %-20s%+v\n", p.tok, p.tokval.pos)
         }
         return Ok(self.pos.clone());
     }
@@ -76,7 +85,7 @@ impl<'a> Parser<'a> {
     }
 
     // file_input = (NEWLINE | stmt)* EOF
-    fn parse_file<'b>(&mut self, bump: &'b Bump, path: &'b Path) -> Result<&'b FileUnit<'b>>
+    fn parse_file(&mut self, path: &'b Path) -> Result<&'b FileUnit<'b>>
     where
         'b: 'a,
     {
@@ -87,41 +96,39 @@ impl<'a> Parser<'a> {
                 continue;
             }
             {
-                let _ = self.parse_stmt(bump, &mut stmts)?;
+                let _ = self.parse_stmt(&mut stmts)?;
             }
         }
-        let f = bump.alloc(FileUnit {
+        let f = self.bump.alloc(FileUnit {
             path,
-            stmts: bump.alloc_slice_copy(&stmts.into_boxed_slice()),
+            stmts: self.bump.alloc_slice_copy(&stmts.into_boxed_slice()),
         });
         return Ok(f);
     }
 
-    fn parse_stmt<'b>(&mut self, bump: &'b Bump, stmts: &mut Vec<&'b Stmt<'b>>) -> Result<()> {
+    fn parse_stmt(&mut self, stmts: &mut Vec<&'b Stmt<'b>>) -> Result<()> {
         match self.tok.kind {
-            Token::Def => stmts.push(self.parse_def_stmt(bump)?),
-            Token::If => stmts.push(self.parse_if_stmt(bump)?),
-            Token::For => stmts.push(self.parse_for_stmt(bump)?),
-            Token::While => stmts.push(self.parse_while_stmt(bump)?),
-            _ => return self.parse_simple_stmt(bump, stmts, true),
+            Token::Def => stmts.push(self.parse_def_stmt()?),
+            Token::If => stmts.push(self.parse_if_stmt()?),
+            Token::For => stmts.push(self.parse_for_stmt()?),
+            Token::While => stmts.push(self.parse_while_stmt()?),
+            _ => return self.parse_simple_stmt(stmts, true),
         }
         return Ok(());
     }
 
-    fn parse_def_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+    fn parse_def_stmt(&mut self) -> Result<&'b Stmt<'b>> {
         self.next_token()?; // consume DEF
         let def_pos = self.pos.clone();
-        let id = self.parse_ident(bump)?;
+        let id = self.parse_ident()?;
         self.consume(Token::LParen)?;
         let lparen: Position = self.pos.clone();
-        let params = self.parse_params(bump)?;
-        let params = bump.alloc_slice_copy(&params.into_boxed_slice());
+        let params = self.parse_params()?;
         self.consume(Token::RParen)?;
         let rparen = self.pos.clone();
         self.consume(Token::Colon)?;
-        let body = self.parse_suite(bump)?;
-        let body = bump.alloc_slice_copy(&body.into_boxed_slice());
-        let stmt: &'b mut Stmt<'b> = bump.alloc(Stmt {
+        let body = self.parse_suite()?;
+        let stmt: &'b mut Stmt<'b> = self.bump.alloc(Stmt {
             span: Span {
                 start: def_pos.clone(),
                 end: def_pos.clone(),
@@ -138,13 +145,13 @@ impl<'a> Parser<'a> {
         return Ok(stmt);
     }
 
-    fn parse_if_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
+    fn parse_if_stmt(&mut self) -> Result<&'b Stmt<'b>> {
         self.next_token()?;
         let if_pos = self.pos.clone(); // consume IF
-        let cond = self.parse_test(bump)?;
+        let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
-        let body = self.parse_suite(bump)?;
-        let if_stmt = bump.alloc(Stmt {
+        let body = self.parse_suite()?;
+        let if_stmt = self.bump.alloc(Stmt {
             span: Span {
                 start: if_pos.clone(),
                 end: if_pos.clone(),
@@ -154,7 +161,7 @@ impl<'a> Parser<'a> {
                 cond: &cond,
                 then_arm: body,
                 else_pos: None,
-                else_arm: vec![],
+                else_arm: &[],
             },
         });
         // Collect "elif" statements and connect them later.
@@ -162,10 +169,10 @@ impl<'a> Parser<'a> {
         while self.tok.kind == Token::Elif {
             self.next_token()?;
             let elif_pos = self.pos.clone(); // consume ELIF
-            let cond = self.parse_test(bump)?;
+            let cond = self.parse_test()?;
             self.consume(Token::Colon)?;
-            let body = self.parse_suite(bump)?;
-            elifs.push(bump.alloc(Stmt {
+            let body = self.parse_suite()?;
+            elifs.push(self.bump.alloc(Stmt {
                 span: Span {
                     start: elif_pos.clone(),
                     end: elif_pos.clone(),
@@ -175,29 +182,15 @@ impl<'a> Parser<'a> {
                     cond: &cond,
                     then_arm: body,
                     else_pos: None,
-                    else_arm: vec![],
+                    else_arm: &[],
                 },
             }));
-            if !elifs.is_empty() {
-                let mut last = elifs.pop().unwrap();
-                while !elifs.is_empty() {
-                    let next_last_if = elifs.pop().unwrap();
-                    match next_last_if {
-                        Stmt {
-                            data:
-                                IfStmt {
-                                    else_pos, else_arm, ..
-                                },
-                            ..
-                        } => {
-                            *else_pos = Some(last.span.start.clone());
-                            *else_arm = vec![last];
-                            last = next_last_if;
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                match if_stmt {
+        }
+        if !elifs.is_empty() {
+            let mut last = elifs.pop().unwrap();
+            while !elifs.is_empty() {
+                let next_last_if = elifs.pop().unwrap();
+                match next_last_if {
                     Stmt {
                         data:
                             IfStmt {
@@ -206,10 +199,24 @@ impl<'a> Parser<'a> {
                         ..
                     } => {
                         *else_pos = Some(last.span.start.clone());
-                        *else_arm = vec![last];
+                        *else_arm = self.bump.alloc_slice_copy(&[&*last]);
+                        last = next_last_if;
                     }
                     _ => unreachable!(),
                 }
+            }
+            match if_stmt {
+                Stmt {
+                    data:
+                        IfStmt {
+                            else_pos, else_arm, ..
+                        },
+                    ..
+                } => {
+                    *else_pos = Some(last.span.start.clone());
+                    *else_arm = self.bump.alloc_slice_copy(&[&*last]);
+                }
+                _ => unreachable!(),
             }
         }
         if self.tok.kind == Token::Else {
@@ -223,45 +230,1123 @@ impl<'a> Parser<'a> {
                 } => {
                     *else_pos = Some(self.next_token()?); // consume ELSE
                     self.consume(Token::Colon)?;
-                    *else_arm = self.parse_suite(bump)?
+                    *else_arm = self.parse_suite()?;
                 }
                 _ => unreachable!(),
             }
         }
-        return Ok(if_stmt);
+        Ok(if_stmt)
     }
 
-    fn parse_for_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
-        todo!()
+    fn parse_for_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+        let for_pos = self.next_token()?; // consume FOR
+        let vars = self.parse_for_loop_vars()?;
+        self.consume(Token::In)?;
+        let x = self.parse_expr(false)?;
+        self.consume(Token::Colon)?;
+        let body = self.parse_suite()?;
+        let for_stmt = self.bump.alloc(Stmt {
+            span: Span {
+                start: for_pos.clone(),
+                end: for_pos.clone(),
+            },
+            data: ForStmt {
+                for_pos,
+                vars,
+                x,
+                body,
+            },
+        });
+        Ok(for_stmt)
     }
 
-    fn parse_while_stmt<'b>(&mut self, bump: &'b Bump) -> Result<&'b Stmt<'b>> {
-        todo!()
+    // Equivalent to 'exprlist' production in Python grammar.
+    //
+    // loop_variables = primary_with_suffix (COMMA primary_with_suffix)* COMMA?
+    fn parse_for_loop_vars(&mut self) -> Result<&'b Expr<'b>> {
+        // Avoid parseExpr because it would consume the IN token
+        // following x in "for x in y: ...".
+        let v = self.parse_primary_with_suffix()?;
+        if self.tok.kind != Token::Comma {
+            return Ok(v);
+        }
+
+        let mut list = vec![v];
+        while self.tok.kind == Token::Comma {
+            self.next_token()?;
+            if terminates_expr_list(&self.tok.kind) {
+                break;
+            }
+            list.push(self.parse_primary_with_suffix()?);
+        }
+        let list = self.bump.alloc_slice_copy(&list.into_boxed_slice());
+        let for_loop_vars = self.bump.alloc(Expr {
+            span: Span {
+                start: v.span.start.clone(),
+                end: v.span.start.clone(), /* todo */
+            },
+            data: ExprData::TupleExpr {
+                lparen: None,
+                list,
+                rparen: None,
+            },
+        });
+        return Ok(&*for_loop_vars);
     }
 
-    fn parse_test<'b>(&mut self, bump: &'b Bump) -> Result<&'b Expr<'b>> {
-        todo!()
+    fn parse_while_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+        let while_pos = self.next_token()?; // consume WHILE
+        let cond = self.parse_test()?;
+        self.consume(Token::Colon)?;
+        let body = self.parse_suite()?;
+        let while_stmt = self.bump.alloc(Stmt {
+            span: Span {
+                start: while_pos.clone(),
+                end: while_pos.clone(),
+            },
+            data: StmtData::WhileStmt {
+                while_pos,
+                cond,
+                body,
+            },
+        });
+        Ok(while_stmt)
     }
 
-    fn parse_suite<'b>(&mut self, bump: &'b Bump) -> Result<Vec<&'b Stmt<'b>>> {
-        todo!()
+    // stmt = LOAD '(' STRING {',' (IDENT '=')? STRING} [','] ')'
+    fn parse_load_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+        let load_pos = self.next_token()?; // consume LOAD
+        self.consume(Token::LParen)?;
+
+        if !matches!(self.tok.kind, Token::String { .. }) {
+            return Err(anyhow!(
+                "{} first operand of load statement must be a string literal",
+                self.pos.clone()
+            ));
+        }
+        let module = self.parse_primary()?; // .(*Literal)
+
+        let mut from: Vec<&Ident> = vec![];
+        let mut to: Vec<&Ident> = vec![]; // var from, to []*Ident
+        while self.tok.kind != Token::RParen && self.tok.kind != Token::Eof {
+            self.consume(Token::Comma)?;
+            if self.tok.kind == Token::RParen {
+                break; // allow trailing comma
+            }
+            //let pos = self.pos.clone();
+            match self.tok.kind {
+                Token::String { decoded } => {
+                    // load("module", "id")
+                    // To name is same as original.
+                    let lit = self.parse_primary()?; //.(*Literal)
+                    let id = self.bump.alloc(Ident {
+                        name_pos: lit.span.start.clone(),
+                        name: decoded.clone(),
+                    });
+                    to.push(id);
+                    from.push(id);
+                }
+                Token::Ident { name } => {
+                    // load("module", to="from")
+                    let id = self.parse_ident()?;
+                    //let name_pos = self.pos.clone();
+                    to.push(id);
+                    if self.tok.kind != Token::Eq {
+                        return Err(anyhow!(
+                            "{} load operand must be {} or {}=\"originalname\" (want '=' after {})",
+                            self.pos,
+                            name,
+                            name,
+                            name
+                        ));
+                    }
+                    self.consume(Token::Eq)?;
+                    if !matches!(self.tok.kind, Token::String { .. }) {
+                        return Err(anyhow!(
+                            "{} original name of loaded symbol must be quoted: {}=\"originalname\"",
+                            self.pos,
+                            name
+                        ));
+                    }
+                    let lit = self.parse_primary()?; // .(*Literal)
+                    match &lit.data {
+                        ExprData::Literal {
+                            token: Token::String { decoded },
+                            token_pos,
+                            ..
+                        } => from.push(self.bump.alloc(Ident {
+                            name_pos: token_pos.clone(),
+                            name: decoded.clone(),
+                        })),
+                        _ => unreachable!(),
+                    }
+                }
+                Token::RParen => {
+                    return Err(anyhow!("{} trailing comma in load statement", self.pos))
+                }
+
+                _ => {
+                    return Err(anyhow!(
+                        "{} load operand must be \"name\" or localname=\"name\" (got {})",
+                        self.pos,
+                        self.tok.kind
+                    ))
+                }
+            }
+        }
+        let rparen = self.consume(Token::RParen)?;
+
+        if to.len() == 0 {
+            return Err(anyhow!(
+                "{} load statement must import at least 1 symbol",
+                self.pos
+            ));
+        }
+        let to = self.bump.alloc_slice_copy(&to.into_boxed_slice());
+        let from = self.bump.alloc_slice_copy(&from.into_boxed_slice());
+        let load_stmt = self.bump.alloc(Stmt {
+            span: Span {
+                start: load_pos.clone(),
+                end: load_pos.clone(),
+            },
+            data: StmtData::LoadStmt {
+                load_pos,
+                module,
+                to,
+                from,
+                rparen_pos: rparen,
+            },
+        });
+        return Ok(load_stmt);
     }
 
-    fn parse_ident<'b>(&mut self, bump: &'b Bump) -> Result<&'b Ident> {
-        todo!()
+    // simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
+    // In REPL mode, it does not consume the NEWLINE.
+    fn parse_simple_stmt(&mut self, stmts: &mut Vec<&'b Stmt<'b>>, consume_nl: bool) -> Result<()> {
+        loop {
+            stmts.push(self.parse_small_stmt()?);
+            if self.tok.kind != Token::Semi {
+                break;
+            }
+            self.next_token()?; // consume SEMI
+            if self.tok.kind == Token::Newline || self.tok.kind == Token::Eof {
+                break;
+            }
+        }
+        // EOF without NEWLINE occurs in `if x: pass`, for example.
+        if self.tok.kind != Token::Eof && consume_nl {
+            self.consume(Token::Newline)?;
+        }
+
+        Ok(())
     }
 
-    fn parse_params<'b>(&mut self, bump: &'b Bump) -> Result<Vec<&'b Expr<'b>>> {
-        todo!();
+    // small_stmt = RETURN expr?
+    //
+    //	| PASS | BREAK | CONTINUE
+    //	| LOAD ...
+    //	| expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') expr   // assign
+    //	| expr
+    fn parse_small_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+        match self.tok.kind {
+            Token::Return => {
+                let pos = self.next_token()?; // consume RETURN
+                let mut result = None;
+                if self.tok.kind != Token::Eof
+                    && self.tok.kind != Token::Newline
+                    && self.tok.kind != Token::Semi
+                {
+                    result = Some(self.parse_expr(false)?);
+                }
+                let return_stmt = self.bump.alloc(Stmt {
+                    span: Span {
+                        start: pos.clone(),
+                        end: pos.clone(),
+                    },
+                    data: StmtData::ReturnStmt {
+                        return_pos: pos,
+                        result,
+                    },
+                });
+                return Ok(return_stmt);
+            }
+            Token::Break | Token::Continue | Token::Pass => {
+                let tok = self.tok.kind;
+                let pos = self.next_token()?; // consume it
+                let branch_stmt = self.bump.alloc(Stmt {
+                    span: Span {
+                        start: pos.clone(),
+                        end: pos.clone(),
+                    },
+                    data: StmtData::BranchStmt {
+                        token: tok,
+                        token_pos: pos,
+                    },
+                });
+                return Ok(branch_stmt);
+            }
+            Token::Load => return self.parse_load_stmt(),
+            _ => {}
+        }
+
+        // Assignment
+        let pos = self.pos.clone();
+        let x = self.parse_expr(false)?;
+        match self.tok.kind {
+            Token::Eq
+            | Token::PlusEq
+            | Token::MinusEq
+            | Token::StarEq
+            | Token::SlashEq
+            | Token::SlashSlashEq
+            | Token::PercentEq
+            | Token::AmpersandEq
+            | Token::PipeEq
+            | Token::CaretEq
+            | Token::LtLtEq
+            | Token::GtGtEq => {
+                let op = self.tok.kind.clone();
+                let pos = self.next_token()?; // consume op
+                let rhs = self.parse_expr(false)?;
+                let assign_stmt = self.bump.alloc(Stmt {
+                    span: Span {
+                        start: pos.clone(),
+                        end: pos.clone(),
+                    },
+                    data: StmtData::AssignStmt {
+                        op_pos: pos,
+                        op,
+                        lhs: x,
+                        rhs,
+                    },
+                });
+                return Ok(assign_stmt);
+            }
+            _ => {}
+        }
+
+        // Expression statement (e.g. function call, doc string).
+        let expr_stmt = self.bump.alloc(Stmt {
+            span: Span {
+                start: pos.clone(),
+                end: pos.clone(),
+            },
+            data: StmtData::ExprStmt { x },
+        });
+        return Ok(expr_stmt);
     }
 
-    fn parse_simple_stmt<'b>(
+    // parse_test parses a 'test', a single-component expression.
+    fn parse_test(&mut self) -> Result<&'b Expr<'b>> {
+        if self.tok.kind == Token::Lambda {
+            return self.parse_lambda(true);
+        }
+
+        let x = self.parse_test_prec(0)?;
+
+        // conditional expression (t IF cond ELSE f)
+        if self.tok.kind == Token::If {
+            let if_pos = self.next_token()?;
+            let cond = self.parse_test_prec(0)?;
+            if self.tok.kind != Token::Else {
+                return Err(anyhow!(
+                    "{} conditional expression without else clause",
+                    if_pos
+                ));
+            }
+            let else_pos = self.next_token()?;
+            let else_ = self.parse_test()?;
+            return Ok(self.bump.alloc(Expr {
+                span: Span {
+                    start: if_pos.clone(),
+                    end: if_pos.clone(),
+                },
+                data: ExprData::CondExpr {
+                    if_pos,
+                    cond,
+                    then_arm: x,
+                    else_pos: else_pos,
+                    else_arm: else_,
+                },
+            }));
+        }
+        Ok(x)
+    }
+
+    fn parse_ident(&mut self) -> Result<&'b Ident> {
+        match self.tok.kind {
+            Token::Ident { name } => {
+                let id = self.bump.alloc(Ident {
+                    name_pos: self.tok.pos.clone(),
+                    name,
+                });
+                self.next_token()?;
+                Ok(id)
+            }
+            _ => Err(anyhow!("{} not an identifier", self.pos)),
+        }
+    }
+
+    // params = (param COMMA)* param COMMA?
+    //
+    //	|
+    //
+    // param = IDENT
+    //
+    //	| IDENT EQ test
+    //	| STAR
+    //	| STAR IDENT
+    //	| STARSTAR IDENT
+    //
+    // parseParams parses a parameter list.  The resulting expressions are of the form:
+    //
+    //	*Ident                                          x
+    //	*Binary{Op: EQ, X: *Ident, Y: Expr}             x=y
+    //	*Unary{Op: STAR}                                *
+    //	*Unary{Op: STAR, X: *Ident}                     *args
+    //	*Unary{Op: STARSTAR, X: *Ident}                 **kwargs
+    fn parse_params(&mut self) -> Result<&'b [&'b Expr<'b>]> {
+        //fn  parseParams() []Expr {
+        let mut params = vec![];
+        while self.tok.kind != Token::RParen
+            && self.tok.kind != Token::Colon
+            && self.tok.kind != Token::Eof
+        {
+            if !params.is_empty() {
+                self.consume(Token::Comma)?;
+            }
+            if self.tok.kind == Token::RParen {
+                break;
+            }
+
+            // * or *args or **kwargs
+            if self.tok.kind == Token::Star || self.tok.kind == Token::StarStar {
+                let op = self.tok.kind;
+                let op_pos = self.next_token()?;
+                let (x, end) =
+                    if op == Token::StarStar || matches!(self.tok.kind, Token::Ident { .. }) {
+                        let ident = self.parse_ident()?;
+                        let ident = self.bump.alloc(ident.as_expr());
+                        (Some(&*ident), self.pos.clone())
+                    } else {
+                        (None, op_pos.clone())
+                    };
+                let unary_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: op_pos.clone(),
+                        end,
+                    },
+                    data: ExprData::UnaryExpr { op_pos, op, x },
+                });
+                params.push(&*unary_expr);
+                continue;
+            }
+
+            // IDENT
+            // IDENT = test
+            let id = self.parse_ident()?;
+            let id = self.bump.alloc(id.as_expr());
+            if self.tok.kind == Token::Eq {
+                // default value
+                let eq = self.next_token()?;
+                let dflt = self.parse_test()?;
+                let binary_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: id.span.start,
+                        end: dflt.span.end,
+                    },
+                    data: ExprData::BinaryExpr {
+                        x: id,
+                        op_pos: eq,
+                        op: Token::Eq,
+                        y: dflt,
+                    },
+                });
+                params.push(binary_expr);
+                continue;
+            }
+
+            params.push(&*id);
+        }
+        let params = self.bump.alloc_slice_copy(&params.into_boxed_slice());
+        Ok(&*params)
+    }
+
+    // parseExpr parses an expression, possible consisting of a
+    // comma-separated list of 'test' expressions.
+    //
+    // In many cases we must use parse_test to avoid ambiguity such as
+    // f(x, y) vs. f((x, y)).
+    fn parse_expr(&mut self, in_parens: bool) -> Result<&'b Expr<'b>> {
+        let x = self.parse_test()?;
+        if self.tok.kind != Token::Comma {
+            return Ok(x);
+        }
+
+        // tuple
+        let mut exprs = vec![x];
+        self.parse_exprs(&mut exprs, in_parens)?;
+        let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
+        let tuple_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: x.span.start.clone(),
+                end: self.pos.clone(),
+            },
+            data: ExprData::TupleExpr {
+                lparen: None,
+                list,
+                rparen: None,
+            },
+        });
+        return Ok(tuple_expr);
+    }
+
+    // primary = IDENT
+    //
+    //	| INT | FLOAT | STRING | BYTES
+    //	| '[' ...                    // list literal or comprehension
+    //	| '{' ...                    // dict literal or comprehension
+    //	| '(' ...                    // tuple or parenthesized expression
+    //	| ('-'|'+'|'~') primary_with_suffix
+    fn parse_primary(&mut self) -> Result<&'b Expr<'b>> {
+        match self.tok.kind {
+            Token::Ident { .. } => {
+                let ident = self.parse_ident()?;
+                let ident_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: ident.name_pos.clone(),
+                        end: ident.name_pos.clone(),
+                    },
+                    data: ExprData::Ident(ident),
+                });
+                return Ok(ident_expr);
+            }
+
+            Token::Int { .. }
+            | Token::Float { .. }
+            | Token::String { .. }
+            | Token::Bytes { .. } => {
+                let pos = self.next_token()?;
+                let literal = self.bump.alloc(Expr {
+                    span: Span {
+                        start: pos.clone(),
+                        end: pos.clone(),
+                    },
+                    data: ExprData::Literal {
+                        token: self.tok.kind.clone(),
+                        token_pos: pos,
+                        raw: self.tok.raw,
+                    },
+                });
+                return Ok(literal);
+            }
+            Token::LBrack => return self.parse_list(),
+
+            Token::LBrace => return self.parse_dict(),
+
+            Token::LParen => {
+                let lparen = self.next_token()?;
+                if self.tok.kind == Token::RParen {
+                    // empty tuple
+                    let rparen = self.next_token()?;
+                    let tuple_expr = self.bump.alloc(Expr {
+                        span: Span {
+                            start: lparen.clone(),
+                            end: rparen.clone(),
+                        },
+                        data: ExprData::TupleExpr {
+                            lparen: Some(lparen),
+                            list: &[],
+                            rparen: Some(rparen),
+                        },
+                    });
+                    return Ok(tuple_expr);
+                }
+                let e = self.parse_expr(true)?; // allow trailing comma
+                let rparen = self.consume(Token::RParen)?;
+                let paren_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: lparen.clone(),
+                        end: rparen.clone(),
+                    },
+                    data: ExprData::ParenExpr {
+                        lparen,
+                        x: e,
+                        rparen,
+                    },
+                });
+                return Ok(paren_expr);
+            }
+            Token::Minus | Token::Plus | Token::Tilde => {
+                // unary
+                let tok = self.tok.kind.clone();
+                let pos = self.next_token()?;
+                let x = self.parse_primary_with_suffix()?;
+                let unary_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: pos.clone(),
+                        end: pos.clone(),
+                    },
+                    data: ExprData::UnaryExpr {
+                        op_pos: pos,
+                        op: tok,
+                        x: Some(x),
+                    },
+                });
+                return Ok(unary_expr);
+            }
+            _ => {
+                return Err(anyhow!(
+                    "{} got {}, want primary expression",
+                    self.pos,
+                    self.tok.kind
+                ))
+            }
+        }
+    }
+
+    // list = '[' ']'
+    //
+    //	| '[' expr ']'
+    //	| '[' expr expr_list ']'
+    //	| '[' expr (FOR loop_variables IN expr)+ ']'
+    fn parse_list(&mut self) -> Result<&'b Expr<'b>> {
+        let lbrack = self.next_token()?;
+        if self.tok.kind == Token::RBrack {
+            // empty List
+            let rbrack = self.next_token()?;
+            let list_expr = self.bump.alloc(Expr {
+                span: Span {
+                    start: lbrack.clone(),
+                    end: rbrack.clone(),
+                },
+                data: ExprData::ListExpr {
+                    lbrack,
+                    list: &[],
+                    rbrack,
+                },
+            });
+            return Ok(list_expr);
+        }
+
+        let x = self.parse_test()?;
+
+        if self.tok.kind == Token::For {
+            // list comprehension
+            return self.parse_comprehension_suffix(lbrack, x, Token::RBrack);
+        }
+
+        let mut exprs = vec![x];
+        if self.tok.kind == Token::Comma {
+            // multi-item list literal
+            self.parse_exprs(&mut exprs, true)? // allow trailing comma
+        }
+
+        let rbrack = self.consume(Token::RBrack)?;
+        let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
+        let list_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: lbrack.clone(),
+                end: rbrack.clone(),
+            },
+            data: ExprData::ListExpr {
+                lbrack,
+                list,
+                rbrack,
+            },
+        });
+        return Ok(list_expr);
+    }
+
+    // dict = '{' '}'
+    //
+    //	| '{' dict_entry_list '}'
+    //	| '{' dict_entry FOR loop_variables IN expr '}'
+    fn parse_dict(&mut self) -> Result<&'b Expr<'b>> {
+        let lbrace = self.next_token()?;
+        if self.tok.kind == Token::RBrace {
+            // empty dict
+            let rbrace = self.next_token()?;
+            let dict_expr = self.bump.alloc(Expr {
+                span: Span {
+                    start: lbrace.clone(),
+                    end: rbrace.clone(),
+                },
+                data: ExprData::DictExpr {
+                    lbrace,
+                    list: &[],
+                    rbrace,
+                },
+            });
+            return Ok(dict_expr);
+        }
+
+        let x = self.parse_dict_entry()?;
+
+        if self.tok.kind == Token::For {
+            // dict comprehension
+            return self.parse_comprehension_suffix(lbrace, x, Token::RBrace);
+        }
+
+        let mut entries = vec![x];
+        while self.tok.kind == Token::Comma {
+            self.next_token()?;
+            if self.tok.kind == Token::RBrace {
+                break;
+            }
+            entries.push(self.parse_dict_entry()?);
+        }
+
+        let rbrace = self.consume(Token::RBrace)?;
+        let list = self.bump.alloc_slice_copy(&entries.into_boxed_slice());
+        let dict_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: lbrace.clone(),
+                end: rbrace.clone(),
+            },
+            data: ExprData::DictExpr {
+                lbrace,
+                list,
+                rbrace,
+            },
+        });
+        return Ok(dict_expr);
+    }
+
+    // dict_entry = test ':' test
+    fn parse_dict_entry(&mut self) -> Result<&'b Expr<'b>> {
+        let k = self.parse_test()?;
+        let colon = self.consume(Token::Colon)?;
+        let v = self.parse_test()?;
+        let dict_entry = self.bump.alloc(Expr {
+            span: Span {
+                start: k.span.start.clone(),
+                end: v.span.end.clone(),
+            },
+            data: ExprData::DictEntry {
+                key: k,
+                colon,
+                value: v,
+            },
+        });
+        Ok(dict_entry)
+    }
+
+    // parseExprs parses a comma-separated list of expressions, starting with the comma.
+    // It is used to parse tuples and list elements.
+    // expr_list = (',' expr)* ','?
+    fn parse_exprs(
         &mut self,
-        bump: &'b Bump,
-        stmts: &mut Vec<&'b Stmt<'b>>,
-        a: bool,
+        exprs: &mut Vec<&'b Expr<'b>>,
+        allow_trailing_comma: bool,
     ) -> Result<()> {
-        todo!();
+        while self.tok.kind == Token::Comma {
+            let pos = self.next_token()?;
+            if terminates_expr_list(&self.tok.kind) {
+                if !allow_trailing_comma {
+                    return Err(anyhow!("{} unparenthesized tuple with trailing comma", pos));
+                }
+                break;
+            }
+            exprs.push(self.parse_test()?);
+        }
+        return Ok(());
+    }
+
+    // call_suffix = '(' arg_list? ')'
+    fn parse_call_suffix(&mut self, func: &'b Expr<'b>) -> Result<&'b Expr<'b>> {
+        let lparen = self.consume(Token::LParen)?;
+        let mut args: &[&Expr] = &[];
+        let rparen = if self.tok.kind == Token::RParen {
+            self.next_token()?
+        } else {
+            args = self.parse_args()?;
+            self.consume(Token::RParen)?
+        };
+        let call_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: func.span.start.clone(),
+                end: rparen.clone(),
+            },
+            data: ExprData::CallExpr {
+                func,
+                lparen,
+                args,
+                rparen,
+            },
+        });
+        Ok(call_expr)
+    }
+
+    // parseLambda parses a lambda expression.
+    // The allowCond flag allows the body to be an 'a if b else c' conditional.
+    fn parse_lambda(&mut self, allow_cond: bool) -> Result<&'b Expr<'b>> {
+        let lambda_pos = self.next_token()?;
+        let mut params: &[&Expr] = &[];
+        if self.tok.kind != Token::Colon {
+            params = self.parse_params()?
+        }
+        self.consume(Token::Colon)?;
+
+        let body = if allow_cond {
+            self.parse_test()?
+        } else {
+            self.parse_test_no_cond()?
+        };
+
+        let lambda_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: lambda_pos.clone(),
+                end: body.span.end.clone(),
+            },
+            data: ExprData::LambdaExpr {
+                lambda_pos,
+                params,
+                body,
+            },
+        });
+        Ok(lambda_expr)
+    }
+
+    // comp_suffix = FOR loopvars IN expr comp_suffix
+    //
+    //	| IF expr comp_suffix
+    //	| ']'  or  ')'                              (end)
+    //
+    // There can be multiple FOR/IF clauses; the first is always a FOR.
+    fn parse_comprehension_suffix(
+        &mut self,
+        lbrace: Position,
+        body: &'b Expr<'b>,
+        end_brace: Token,
+    ) -> Result<&'b Expr<'b>> {
+        let mut clauses = vec![]; // []Node
+        while self.tok.kind != end_brace {
+            if self.tok.kind == Token::For {
+                let for_pos = self.next_token()?;
+                let vars = self.parse_for_loop_vars()?;
+                let in_pos = self.consume(Token::In)?;
+                // Following Python 3, the operand of IN cannot be:
+                // - a conditional expression ('x if y else z'),
+                //   due to conflicts in Python grammar
+                //  ('if' is used by the comprehension);
+                // - a lambda expression
+                // - an unparenthesized tuple.
+                let x = self.parse_test_prec(0)?;
+                let clause = self.bump.alloc(Clause::ForClause {
+                    for_pos,
+                    vars,
+                    in_pos,
+                    x,
+                });
+                clauses.push(&*clause);
+            } else if self.tok.kind == Token::If {
+                let if_pos = self.next_token()?;
+                let cond = self.parse_test_no_cond()?;
+                let clause = self.bump.alloc(Clause::IfClause { if_pos, cond });
+                clauses.push(&*clause);
+            } else {
+                return Err(anyhow!(
+                    "{} got {}, want '{}', for, or if",
+                    self.pos,
+                    self.tok.kind,
+                    end_brace
+                ));
+            }
+        }
+        let rbrace = self.next_token()?;
+        let clauses = self.bump.alloc_slice_copy(&clauses.into_boxed_slice());
+        let comprehension = self.bump.alloc(Expr {
+            span: Span {
+                start: lbrace.clone(),
+                end: rbrace.clone(),
+            },
+            data: ExprData::Comprehension {
+                curly: end_brace == Token::RBrace,
+                lbrack_pos: lbrace,
+                body,
+                clauses,
+                rbrack_pos: rbrace,
+            },
+        });
+        Ok(comprehension)
+    }
+
+    // parse_testNoCond parses a a single-component expression without
+    // consuming a trailing 'if expr else expr'.
+    fn parse_test_no_cond(&mut self) -> Result<&'b Expr<'b>> {
+        if self.tok.kind == Token::Lambda {
+            self.parse_lambda(false)
+        } else {
+            self.parse_test_prec(0)
+        }
+    }
+
+    fn parse_test_prec(&mut self, prec: usize) -> Result<&'b Expr<'b>> {
+        if prec >= MAX_PREC {
+            return self.parse_primary_with_suffix();
+        }
+
+        // expr = NOT expr
+        if self.tok.kind == Token::Not && prec == Token::Not.precedence() {
+            let op_pos = self.next_token()?;
+            let x = self.parse_test_prec(prec)?;
+            let unary_expr = self.bump.alloc(Expr {
+                span: Span {
+                    start: op_pos.clone(),
+                    end: x.span.end.clone(),
+                },
+                data: ExprData::UnaryExpr {
+                    op_pos,
+                    op: Token::Not,
+                    x: Some(x),
+                },
+            });
+            return Ok(unary_expr);
+        }
+
+        self.parse_binop_expr(prec)
+    }
+
+    // parseArgs parses a list of actual parameter values (arguments).
+    // It mirrors the structure of parseParams.
+    // arg_list = ((arg COMMA)* arg COMMA?)?
+    fn parse_args(&mut self) -> Result<&'b [&'b Expr<'b>]> {
+        let mut args = vec![];
+        while self.tok.kind != Token::RParen && self.tok.kind != Token::Eof {
+            if !args.is_empty() {
+                self.consume(Token::Comma)?;
+            }
+            if self.tok.kind == Token::RParen {
+                break;
+            }
+
+            // *args or **kwargs
+            if self.tok.kind == Token::Star || self.tok.kind == Token::StarStar {
+                let op = self.tok.kind;
+                let op_pos = self.next_token()?;
+                let x = self.parse_test()?;
+                let unary_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: op_pos.clone(),
+                        end: x.span.end.clone(),
+                    },
+                    data: ExprData::UnaryExpr {
+                        op_pos,
+                        op,
+                        x: Some(x),
+                    },
+                });
+                args.push(&*unary_expr);
+                continue;
+            }
+
+            // We use a different strategy from Bazel here to stay within LL(1).
+            // Instead of looking ahead two tokens (IDENT, EQ) we parse
+            // 'test = test' then check that the first was an IDENT.
+            let mut x = self.parse_test()?;
+
+            if self.tok.kind == Token::Eq {
+                // name = value
+                if !matches!(x.data, ExprData::Ident { .. }) {
+                    return Err(anyhow!(
+                        "{} keyword argument must have form name=expr",
+                        self.pos
+                    ));
+                }
+                let op_pos = self.next_token()?;
+                let y = self.parse_test()?;
+                x = self.bump.alloc(Expr {
+                    span: Span {
+                        start: x.span.start.clone(),
+                        end: y.span.end.clone(),
+                    },
+                    data: ExprData::BinaryExpr {
+                        x,
+                        op_pos,
+                        op: Token::Eq,
+                        y,
+                    },
+                });
+            }
+
+            args.push(x);
+        }
+        let args = self.bump.alloc_slice_copy(&args.into_boxed_slice());
+        return Ok(args);
+    }
+
+    // suite is typically what follows a COLON (e.g. after DEF or FOR).
+    // suite = simple_stmt | NEWLINE INDENT stmt+ OUTDENT
+    fn parse_suite(&mut self) -> Result<&'b [&'b Stmt<'b>]> {
+        let mut stmts = vec![]; // []Stmt
+        if self.tok.kind == Token::Newline {
+            self.next_token()?; // consume NEWLINE
+            self.consume(Token::Indent)?;
+            while self.tok.kind != Token::Outdent && self.tok.kind != Token::Eof {
+                self.parse_stmt(&mut stmts)?;
+            }
+            self.consume(Token::Outdent)?;
+        } else {
+            self.parse_simple_stmt(&mut stmts, true)?;
+        }
+        let stmts = self.bump.alloc_slice_copy(&stmts.into_boxed_slice());
+        return Ok(&*stmts);
+    }
+
+    // expr = test (OP test)*
+    // Uses precedence climbing; see http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm#climbing.
+    fn parse_binop_expr(&mut self, prec: usize) -> Result<&'b Expr<'b>> {
+        let mut x = self.parse_test_prec(prec + 1)?;
+        let mut first = true;
+        loop {
+            if self.tok.kind == Token::Not {
+                self.next_token()?; // consume NOT
+                                    // In this context, NOT must be followed by IN.
+                                    // Replace NOT IN by a single NOT_IN token.
+                if self.tok.kind != Token::In {
+                    return Err(anyhow!("{} got {}, want in", self.pos, self.tok.kind));
+                }
+                self.tok.kind = Token::NotIn;
+            }
+
+            // Binary operator of specified precedence?
+            let op_prec = self.tok.kind.precedence();
+            if op_prec < prec {
+                let x = self.bump.alloc(x);
+                return Ok(&*x);
+            }
+
+            // Comparisons are non-associative.
+            if !first && op_prec == Token::Eq.precedence() {
+                match x.data {
+                    ExprData::BinaryExpr { op, .. } => {
+                        return Err(anyhow!(
+                            "{} {} does not associate with {} (use parens)",
+                            self.pos,
+                            op,
+                            self.tok.kind
+                        ))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            let op = self.tok.kind;
+            let op_pos = self.next_token()?;
+            let y = self.parse_test_prec(op_prec + 1)?;
+            let binary_expr = self.bump.alloc(Expr {
+                span: Span {
+                    start: x.span.start.clone(),
+                    end: y.span.end.clone(),
+                },
+                data: ExprData::BinaryExpr { op_pos, op, x, y },
+            });
+            x = &*binary_expr;
+            first = false;
+        }
+    }
+
+    // primary_with_suffix = primary
+    //
+    //	| primary '.' IDENT
+    //	| primary slice_suffix
+    //	| primary call_suffix
+    fn parse_primary_with_suffix(&mut self) -> Result<&'b Expr<'b>> {
+        let mut x = self.parse_primary()?;
+        loop {
+            match self.tok.kind {
+                Token::Dot => {
+                    let dot = self.next_token()?;
+                    let id = self.parse_ident()?;
+                    let name_pos = self.pos.clone();
+                    let dot_expr = self.bump.alloc(Expr {
+                        span: Span {
+                            start: x.span.start.clone(),
+                            end: name_pos.clone(),
+                        },
+                        data: ExprData::DotExpr {
+                            dot,
+                            x,
+                            name: id,
+                            name_pos,
+                        },
+                    });
+                    x = &*dot_expr;
+                }
+                Token::LBrack => x = self.parse_slice_suffix(x)?,
+                Token::LParen => x = self.parse_call_suffix(x)?,
+                _ => return Ok(x),
+            }
+        }
+    }
+
+    // slice_suffix = '[' expr? ':' expr?  ':' expr? ']'
+    fn parse_slice_suffix(&mut self, x: &'b Expr<'b>) -> Result<&'b Expr<'b>> {
+        let lbrack = self.next_token()?;
+        let mut lo: Option<&Expr> = None;
+        if self.tok.kind != Token::Colon {
+            let y = self.parse_expr(false)?;
+
+            // index x[y]
+            if self.tok.kind == Token::RBrack {
+                let rbrack = self.next_token()?;
+                let index_expr = self.bump.alloc(Expr {
+                    span: Span {
+                        start: x.span.start.clone(),
+                        end: rbrack.clone(),
+                    },
+                    data: ExprData::IndexExpr {
+                        x,
+                        lbrack,
+                        y,
+                        rbrack,
+                    },
+                });
+                return Ok(index_expr);
+            }
+
+            lo = Some(y)
+        }
+        let mut hi: Option<&Expr> = None; //,
+                                          // slice or substring x[lo:hi:step]
+        if self.tok.kind == Token::Colon {
+            self.next_token()?;
+            if self.tok.kind != Token::Colon && self.tok.kind != Token::RBrack {
+                hi = Some(self.parse_test()?);
+            }
+        }
+        let mut step: Option<&Expr> = None;
+        if self.tok.kind == Token::Colon {
+            self.next_token()?;
+            if self.tok.kind != Token::RBrack {
+                step = Some(self.parse_test()?);
+            }
+        }
+        let rbrack = self.consume(Token::RBrack)?;
+        let slice_expr = self.bump.alloc(Expr {
+            span: Span {
+                start: lbrack.clone(),
+                end: rbrack.clone(),
+            },
+            data: ExprData::SliceExpr {
+                x,
+                lbrack,
+                lo,
+                hi,
+                step,
+                rbrack,
+            },
+        });
+        Ok(slice_expr)
+    }
+}
+
+fn terminates_expr_list(tok: &Token) -> bool {
+    use Token::*;
+    match tok {
+        Eof | Newline | Eq | RBrace | RBrack | RParen | Semi => true,
+        _ => false,
     }
 }
 
@@ -295,19 +1380,19 @@ func (opts *FileOptions) ParseCompoundStmt(filename string, readline func() ([]b
     p := parser{options: opts, in: in}
     defer p.in.recover(&err)
 
-    p.nextToken() // read first lookahead token
+    self.next_token() // read first lookahead token
 
     var stmts []Stmt
-    switch p.tok {
+    switch self.tok {
     case DEF, IF, FOR, WHILE:
-        stmts = p.parseStmt(stmts)
+        stmts = self.parseStmt(stmts)
     case NEWLINE:
         // blank line
     default:
-        stmts = p.parseSimpleStmt(stmts, false)
+        stmts = self.parseSimpleStmt(stmts, false)
         // Require but don't consume newline, to avoid blocking again.
-        if p.tok != NEWLINE {
-            p.in.errorf(p.in.pos, "invalid syntax")
+        if self.tok != NEWLINE {
+            self.in.errorf(self.in.pos, "invalid syntax")
         }
     }
 
@@ -329,617 +1414,66 @@ func (opts *FileOptions) ParseExpr(filename string, src interface{}, mode Mode) 
         return nil, err
     }
     p := parser{options: opts, in: in}
-    defer p.in.recover(&err)
+    defer self.in.recover(&err)
 
-    p.nextToken() // read first lookahead token
+    self.next_token() // read first lookahead token
 
-    // Use parseExpr, not parseTest, to permit an unparenthesized tuple.
-    expr = p.parseExpr(false)
+    // Use parseExpr, not parse_test, to permit an unparenthesized tuple.
+    expr = self.parseExpr(false)
 
     // A following newline (e.g. "f()\n") appears outside any brackets,
     // on a non-blank line, and thus results in a NEWLINE token.
-    if p.tok == NEWLINE {
-        p.nextToken()
+    if self.tok == NEWLINE {
+        self.next_token()
     }
 
-    if p.tok != EOF {
-        p.in.errorf(p.in.pos, "got %#v after expression, want EOF", p.tok)
-    }
-    p.assignComments(expr)
-    return expr, nil
-}
-
-type parser struct {
-    options *FileOptions
-    in      *scanner
-    tok     Token
-    tokval  tokenValue
-}
-
-// nextToken advances the scanner and returns the position of the
-// previous token.
-func (p *parser) nextToken() Position {
-    oldpos := p.tokval.pos
-    p.tok = p.in.nextToken(&p.tokval)
-    // enable to see the token stream
-    if debug {
-        log.Printf("nextToken: %-20s%+v\n", p.tok, p.tokval.pos)
-    }
-    return oldpos
-}
-
-
-
-
-func (p *parser) parseForStmt() Stmt {
-    forpos := p.nextToken() // consume FOR
-    vars := p.parseForLoopVariables()
-    p.consume(IN)
-    x := p.parseExpr(false)
-    p.consume(COLON)
-    body := p.parseSuite()
-    return &ForStmt{
-        For:  forpos,
-        Vars: vars,
-        X:    x,
-        Body: body,
-    }
-}
-
-func (p *parser) parseWhileStmt() Stmt {
-    whilepos := p.nextToken() // consume WHILE
-    cond := p.parseTest()
-    p.consume(COLON)
-    body := p.parseSuite()
-    return &WhileStmt{
-        While: whilepos,
-        Cond:  cond,
-        Body:  body,
-    }
-}
-
-// Equivalent to 'exprlist' production in Python grammar.
-//
-// loop_variables = primary_with_suffix (COMMA primary_with_suffix)* COMMA?
-func (p *parser) parseForLoopVariables() Expr {
-    // Avoid parseExpr because it would consume the IN token
-    // following x in "for x in y: ...".
-    v := p.parsePrimaryWithSuffix()
-    if p.tok != COMMA {
-        return v
-    }
-
-    list := []Expr{v}
-    for p.tok == COMMA {
-        p.nextToken()
-        if terminatesExprList(p.tok) {
-            break
-        }
-        list = append(list, p.parsePrimaryWithSuffix())
-    }
-    return &TupleExpr{List: list}
-}
-
-// simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
-// In REPL mode, it does not consume the NEWLINE.
-func (p *parser) parseSimpleStmt(stmts []Stmt, consumeNL bool) []Stmt {
-    for {
-        stmts = append(stmts, p.parseSmallStmt())
-        if p.tok != SEMI {
-            break
-        }
-        p.nextToken() // consume SEMI
-        if p.tok == NEWLINE || p.tok == EOF {
-            break
-        }
-    }
-    // EOF without NEWLINE occurs in `if x: pass`, for example.
-    if p.tok != EOF && consumeNL {
-        p.consume(NEWLINE)
-    }
-
-    return stmts
-}
-
-// small_stmt = RETURN expr?
-//
-//	| PASS | BREAK | CONTINUE
-//	| LOAD ...
-//	| expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') expr   // assign
-//	| expr
-func (p *parser) parseSmallStmt() Stmt {
-    switch p.tok {
-    case RETURN:
-        pos := p.nextToken() // consume RETURN
-        var result Expr
-        if p.tok != EOF && p.tok != NEWLINE && p.tok != SEMI {
-            result = p.parseExpr(false)
-        }
-        return &ReturnStmt{Return: pos, Result: result}
-
-    case BREAK, CONTINUE, PASS:
-        tok := p.tok
-        pos := p.nextToken() // consume it
-        return &BranchStmt{Token: tok, TokenPos: pos}
-
-    case LOAD:
-        return p.parseLoadStmt()
-    }
-
-    // Assignment
-    x := p.parseExpr(false)
-    switch p.tok {
-    case EQ, PLUS_EQ, MINUS_EQ, STAR_EQ, SLASH_EQ, SLASHSLASH_EQ, PERCENT_EQ, AMP_EQ, PIPE_EQ, CIRCUMFLEX_EQ, LTLT_EQ, GTGT_EQ:
-        op := p.tok
-        pos := p.nextToken() // consume op
-        rhs := p.parseExpr(false)
-        return &AssignStmt{OpPos: pos, Op: op, LHS: x, RHS: rhs}
-    }
-
-    // Expression statement (e.g. function call, doc string).
-    return &ExprStmt{X: x}
-}
-
-// stmt = LOAD '(' STRING {',' (IDENT '=')? STRING} [','] ')'
-func (p *parser) parseLoadStmt() *LoadStmt {
-    loadPos := p.nextToken() // consume LOAD
-    lparen := p.consume(LPAREN)
-
-    if p.tok != STRING {
-        p.in.errorf(p.in.pos, "first operand of load statement must be a string literal")
-    }
-    module := p.parsePrimary().(*Literal)
-
-    var from, to []*Ident
-    for p.tok != RPAREN && p.tok != EOF {
-        p.consume(COMMA)
-        if p.tok == RPAREN {
-            break // allow trailing comma
-        }
-        switch p.tok {
-        case STRING:
-            // load("module", "id")
-            // To name is same as original.
-            lit := p.parsePrimary().(*Literal)
-            id := &Ident{
-                NamePos: lit.TokenPos.add(`"`),
-                Name:    lit.Value.(string),
-            }
-            to = append(to, id)
-            from = append(from, id)
-
-        case IDENT:
-            // load("module", to="from")
-            id := p.parseIdent()
-            to = append(to, id)
-            if p.tok != EQ {
-                p.in.errorf(p.in.pos, `load operand must be "%[1]s" or %[1]s="originalname" (want '=' after %[1]s)`, id.Name)
-            }
-            p.consume(EQ)
-            if p.tok != STRING {
-                p.in.errorf(p.in.pos, `original name of loaded symbol must be quoted: %s="originalname"`, id.Name)
-            }
-            lit := p.parsePrimary().(*Literal)
-            from = append(from, &Ident{
-                NamePos: lit.TokenPos.add(`"`),
-                Name:    lit.Value.(string),
-            })
-
-        case RPAREN:
-            p.in.errorf(p.in.pos, "trailing comma in load statement")
-
-        default:
-            p.in.errorf(p.in.pos, `load operand must be "name" or localname="name" (got %#v)`, p.tok)
-        }
-    }
-    rparen := p.consume(RPAREN)
-
-    if len(to) == 0 {
-        p.in.errorf(lparen, "load statement must import at least 1 symbol")
-    }
-    return &LoadStmt{
-        Load:   loadPos,
-        Module: module,
-        To:     to,
-        From:   from,
-        Rparen: rparen,
-    }
-}
-
-// suite is typically what follows a COLON (e.g. after DEF or FOR).
-// suite = simple_stmt | NEWLINE INDENT stmt+ OUTDENT
-func (p *parser) parseSuite() []Stmt {
-    if p.tok == NEWLINE {
-        p.nextToken() // consume NEWLINE
-        p.consume(INDENT)
-        var stmts []Stmt
-        for p.tok != OUTDENT && p.tok != EOF {
-            stmts = p.parseStmt(stmts)
-        }
-        p.consume(OUTDENT)
-        return stmts
-    }
-
-    return p.parseSimpleStmt(nil, true)
-}
-
-func (p *parser) parseIdent() *Ident {
-    if p.tok != IDENT {
-        p.in.error(p.in.pos, "not an identifier")
-    }
-    id := &Ident{
-        NamePos: p.tokval.pos,
-        Name:    p.tokval.raw,
-    }
-    p.nextToken()
-    return id
-}
-
-func (p *parser) consume(t Token) Position {
-    if p.tok != t {
-        p.in.errorf(p.in.pos, "got %#v, want %#v", p.tok, t)
-    }
-    return p.nextToken()
-}
-
-// params = (param COMMA)* param COMMA?
-//
-//	|
-//
-// param = IDENT
-//
-//	| IDENT EQ test
-//	| STAR
-//	| STAR IDENT
-//	| STARSTAR IDENT
-//
-// parseParams parses a parameter list.  The resulting expressions are of the form:
-//
-//	*Ident                                          x
-//	*Binary{Op: EQ, X: *Ident, Y: Expr}             x=y
-//	*Unary{Op: STAR}                                *
-//	*Unary{Op: STAR, X: *Ident}                     *args
-//	*Unary{Op: STARSTAR, X: *Ident}                 **kwargs
-func (p *parser) parseParams() []Expr {
-    var params []Expr
-    for p.tok != RPAREN && p.tok != COLON && p.tok != EOF {
-        if len(params) > 0 {
-            p.consume(COMMA)
-        }
-        if p.tok == RPAREN {
-            break
-        }
-
-        // * or *args or **kwargs
-        if p.tok == STAR || p.tok == STARSTAR {
-            op := p.tok
-            pos := p.nextToken()
-            var x Expr
-            if op == STARSTAR || p.tok == IDENT {
-                x = p.parseIdent()
-            }
-            params = append(params, &UnaryExpr{
-                OpPos: pos,
-                Op:    op,
-                X:     x,
-            })
-            continue
-        }
-
-        // IDENT
-        // IDENT = test
-        id := p.parseIdent()
-        if p.tok == EQ { // default value
-            eq := p.nextToken()
-            dflt := p.parseTest()
-            params = append(params, &BinaryExpr{
-                X:     id,
-                OpPos: eq,
-                Op:    EQ,
-                Y:     dflt,
-            })
-            continue
-        }
-
-        params = append(params, id)
-    }
-    return params
-}
-
-// parseExpr parses an expression, possible consisting of a
-// comma-separated list of 'test' expressions.
-//
-// In many cases we must use parseTest to avoid ambiguity such as
-// f(x, y) vs. f((x, y)).
-func (p *parser) parseExpr(inParens bool) Expr {
-    x := p.parseTest()
-    if p.tok != COMMA {
-        return x
-    }
-
-    // tuple
-    exprs := p.parseExprs([]Expr{x}, inParens)
-    return &TupleExpr{List: exprs}
-}
-
-// parseExprs parses a comma-separated list of expressions, starting with the comma.
-// It is used to parse tuples and list elements.
-// expr_list = (',' expr)* ','?
-func (p *parser) parseExprs(exprs []Expr, allowTrailingComma bool) []Expr {
-    for p.tok == COMMA {
-        pos := p.nextToken()
-        if terminatesExprList(p.tok) {
-            if !allowTrailingComma {
-                p.in.error(pos, "unparenthesized tuple with trailing comma")
-            }
-            break
-        }
-        exprs = append(exprs, p.parseTest())
-    }
-    return exprs
-}
-
-// parseTest parses a 'test', a single-component expression.
-func (p *parser) parseTest() Expr {
-    if p.tok == LAMBDA {
-        return p.parseLambda(true)
-    }
-
-    x := p.parseTestPrec(0)
-
-    // conditional expression (t IF cond ELSE f)
-    if p.tok == IF {
-        ifpos := p.nextToken()
-        cond := p.parseTestPrec(0)
-        if p.tok != ELSE {
-            p.in.error(ifpos, "conditional expression without else clause")
-        }
-        elsepos := p.nextToken()
-        else_ := p.parseTest()
-        return &CondExpr{If: ifpos, Cond: cond, True: x, ElsePos: elsepos, False: else_}
-    }
-
-    return x
-}
-
-// parseTestNoCond parses a a single-component expression without
-// consuming a trailing 'if expr else expr'.
-func (p *parser) parseTestNoCond() Expr {
-    if p.tok == LAMBDA {
-        return p.parseLambda(false)
-    }
-    return p.parseTestPrec(0)
-}
-
-// parseLambda parses a lambda expression.
-// The allowCond flag allows the body to be an 'a if b else c' conditional.
-func (p *parser) parseLambda(allowCond bool) Expr {
-    lambda := p.nextToken()
-    var params []Expr
-    if p.tok != COLON {
-        params = p.parseParams()
-    }
-    p.consume(COLON)
-
-    var body Expr
-    if allowCond {
-        body = p.parseTest()
-    } else {
-        body = p.parseTestNoCond()
-    }
-
-    return &LambdaExpr{
-        Lambda: lambda,
-        Params: params,
-        Body:   body,
-    }
-}
-
-func (p *parser) parseTestPrec(prec int) Expr {
-    if prec >= len(preclevels) {
-        return p.parsePrimaryWithSuffix()
-    }
-
-    // expr = NOT expr
-    if p.tok == NOT && prec == int(precedence[NOT]) {
-        pos := p.nextToken()
-        x := p.parseTestPrec(prec)
-        return &UnaryExpr{
-            OpPos: pos,
-            Op:    NOT,
-            X:     x,
-        }
-    }
-
-    return p.parseBinopExpr(prec)
-}
-
-// expr = test (OP test)*
-// Uses precedence climbing; see http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm#climbing.
-func (p *parser) parseBinopExpr(prec int) Expr {
-    x := p.parseTestPrec(prec + 1)
-    for first := true; ; first = false {
-        if p.tok == NOT {
-            p.nextToken() // consume NOT
-            // In this context, NOT must be followed by IN.
-            // Replace NOT IN by a single NOT_IN token.
-            if p.tok != IN {
-                p.in.errorf(p.in.pos, "got %#v, want in", p.tok)
-            }
-            p.tok = NOT_IN
-        }
-
-        // Binary operator of specified precedence?
-        opprec := int(precedence[p.tok])
-        if opprec < prec {
-            return x
-        }
-
-        // Comparisons are non-associative.
-        if !first && opprec == int(precedence[EQL]) {
-            p.in.errorf(p.in.pos, "%s does not associate with %s (use parens)",
-                x.(*BinaryExpr).Op, p.tok)
-        }
-
-        op := p.tok
-        pos := p.nextToken()
-        y := p.parseTestPrec(opprec + 1)
-        x = &BinaryExpr{OpPos: pos, Op: op, X: x, Y: y}
-    }
-}
-
-// precedence maps each operator to its precedence (0-7), or -1 for other tokens.
-var precedence [maxToken]int8
-
-// preclevels groups operators of equal precedence.
-// Comparisons are nonassociative; other binary operators associate to the left.
-// Unary MINUS, unary PLUS, and TILDE have higher precedence so are handled in parsePrimary.
-// See https://github.com/google/starlark-go/blob/master/doc/spec.md#binary-operators
-var preclevels = [...][]Token{
-    {OR},                                   // or
-    {AND},                                  // and
-    {NOT},                                  // not (unary)
-    {EQL, NEQ, LT, GT, LE, GE, IN, NOT_IN}, // == != < > <= >= in not in
-    {PIPE},                                 // |
-    {CIRCUMFLEX},                           // ^
-    {AMP},                                  // &
-    {LTLT, GTGT},                           // << >>
-    {MINUS, PLUS},                          // -
-    {STAR, PERCENT, SLASH, SLASHSLASH},     // * % / //
-}
-
-func init() {
-    // populate precedence table
-    for i := range precedence {
-        precedence[i] = -1
-    }
-    for level, tokens := range preclevels {
-        for _, tok := range tokens {
-            precedence[tok] = int8(level)
-        }
-    }
-}
-
-// primary_with_suffix = primary
+    if self.tok != EO// primary_with_suffix = primary
 //
 //	| primary '.' IDENT
 //	| primary slice_suffix
 //	| primary call_suffix
-func (p *parser) parsePrimaryWithSuffix() Expr {
-    x := p.parsePrimary()
+fn  parsePrimaryWithSuffix() Expr {
+    x := self.parsePrimary()
     for {
-        switch p.tok {
+        switch self.tok {
         case DOT:
-            dot := p.nextToken()
-            id := p.parseIdent()
+            dot := self.next_token()
+            id := self.parse_ident()
             x = &DotExpr{Dot: dot, X: x, Name: id}
         case LBRACK:
-            x = p.parseSliceSuffix(x)
+            x = self.parseSliceSuffix(x)
         case LPAREN:
-            x = p.parseCallSuffix(x)
+            x = self.parseCallSuffix(x)
         default:
             return x
         }
     }
 }
-
-// slice_suffix = '[' expr? ':' expr?  ':' expr? ']'
-func (p *parser) parseSliceSuffix(x Expr) Expr {
-    lbrack := p.nextToken()
-    var lo, hi, step Expr
-    if p.tok != COLON {
-        y := p.parseExpr(false)
-
-        // index x[y]
-        if p.tok == RBRACK {
-            rbrack := p.nextToken()
-            return &IndexExpr{X: x, Lbrack: lbrack, Y: y, Rbrack: rbrack}
-        }
-
-        lo = y
+F {
+        self.in.errorf(self.in.pos, "got %#v after expression, want EOF", self.tok)
     }
-
-    // slice or substring x[lo:hi:step]
-    if p.tok == COLON {
-        p.nextToken()
-        if p.tok != COLON && p.tok != RBRACK {
-            hi = p.parseTest()
-        }
-    }
-    if p.tok == COLON {
-        p.nextToken()
-        if p.tok != RBRACK {
-            step = p.parseTest()
-        }
-    }
-    rbrack := p.consume(RBRACK)
-    return &SliceExpr{X: x, Lbrack: lbrack, Lo: lo, Hi: hi, Step: step, Rbrack: rbrack}
+    self.assignComments(expr)
+    return expr, nil
 }
 
-// call_suffix = '(' arg_list? ')'
-func (p *parser) parseCallSuffix(fn Expr) Expr {
-    lparen := p.consume(LPAREN)
-    var rparen Position
-    var args []Expr
-    if p.tok == RPAREN {
-        rparen = p.nextToken()
-    } else {
-        args = p.parseArgs()
-        rparen = p.consume(RPAREN)
+
+
+
+
+
+fn  consume(t Token) Position {
+    if self.tok != t {
+        self.in.errorf(self.in.pos, "got %#v, want %#v", self.tok, t)
     }
-    return &CallExpr{Fn: fn, Lparen: lparen, Args: args, Rparen: rparen}
+    return self.next_token()
 }
 
-// parseArgs parses a list of actual parameter values (arguments).
-// It mirrors the structure of parseParams.
-// arg_list = ((arg COMMA)* arg COMMA?)?
-func (p *parser) parseArgs() []Expr {
-    var args []Expr
-    for p.tok != RPAREN && p.tok != EOF {
-        if len(args) > 0 {
-            p.consume(COMMA)
-        }
-        if p.tok == RPAREN {
-            break
-        }
 
-        // *args or **kwargs
-        if p.tok == STAR || p.tok == STARSTAR {
-            op := p.tok
-            pos := p.nextToken()
-            x := p.parseTest()
-            args = append(args, &UnaryExpr{
-                OpPos: pos,
-                Op:    op,
-                X:     x,
-            })
-            continue
-        }
 
-        // We use a different strategy from Bazel here to stay within LL(1).
-        // Instead of looking ahead two tokens (IDENT, EQ) we parse
-        // 'test = test' then check that the first was an IDENT.
-        x := p.parseTest()
 
-        if p.tok == EQ {
-            // name = value
-            if _, ok := x.(*Ident); !ok {
-                p.in.errorf(p.in.pos, "keyword argument must have form name=expr")
-            }
-            eq := p.nextToken()
-            y := p.parseTest()
-            x = &BinaryExpr{
-                X:     x,
-                OpPos: eq,
-                Op:    EQ,
-                Y:     y,
-            }
-        }
 
-        args = append(args, x)
-    }
-    return args
-}
+
+
 
 // primary = IDENT
 //
@@ -948,45 +1482,45 @@ func (p *parser) parseArgs() []Expr {
 //	| '{' ...                    // dict literal or comprehension
 //	| '(' ...                    // tuple or parenthesized expression
 //	| ('-'|'+'|'~') primary_with_suffix
-func (p *parser) parsePrimary() Expr {
-    switch p.tok {
+fn  parsePrimary() Expr {
+    switch self.tok {
     case IDENT:
-        return p.parseIdent()
+        return self.parse_ident()
 
     case INT, FLOAT, STRING, BYTES:
         var val interface{}
-        tok := p.tok
+        tok := self.tok
         switch tok {
         case INT:
-            if p.tokval.bigInt != nil {
-                val = p.tokval.bigInt
+            if self.tokval.bigInt != nil {
+                val = self.tokval.bigInt
             } else {
-                val = p.tokval.int
+                val = self.tokval.int
             }
         case FLOAT:
-            val = p.tokval.float
+            val = self.tokval.float
         case STRING, BYTES:
-            val = p.tokval.string
+            val = self.tokval.string
         }
-        raw := p.tokval.raw
-        pos := p.nextToken()
+        raw := self.tokval.raw
+        pos := self.next_token()
         return &Literal{Token: tok, TokenPos: pos, Raw: raw, Value: val}
 
     case LBRACK:
-        return p.parseList()
+        return self.parseList()
 
     case LBRACE:
-        return p.parseDict()
+        return self.parseDict()
 
     case LPAREN:
-        lparen := p.nextToken()
-        if p.tok == RPAREN {
+        lparen := self.next_token()
+        if self.tok == RPAREN {
             // empty tuple
-            rparen := p.nextToken()
+            rparen := self.next_token()
             return &TupleExpr{Lparen: lparen, Rparen: rparen}
         }
-        e := p.parseExpr(true) // allow trailing comma
-        rparen := p.consume(RPAREN)
+        e := self.parseExpr(true) // allow trailing comma
+        rparen := self.consume(RPAREN)
         return &ParenExpr{
             Lparen: lparen,
             X:      e,
@@ -994,136 +1528,21 @@ func (p *parser) parsePrimary() Expr {
         }
 
     case MINUS, PLUS, TILDE: // unary
-        tok := p.tok
-        pos := p.nextToken()
-        x := p.parsePrimaryWithSuffix()
+        tok := self.tok
+        pos := self.next_token()
+        x := self.parsePrimaryWithSuffix()
         return &UnaryExpr{
             OpPos: pos,
             Op:    tok,
             X:     x,
         }
     }
-    p.in.errorf(p.in.pos, "got %#v, want primary expression", p.tok)
+    self.in.errorf(self.in.pos, "got %#v, want primary expression", self.tok)
     panic("unreachable")
 }
 
-// list = '[' ']'
-//
-//	| '[' expr ']'
-//	| '[' expr expr_list ']'
-//	| '[' expr (FOR loop_variables IN expr)+ ']'
-func (p *parser) parseList() Expr {
-    lbrack := p.nextToken()
-    if p.tok == RBRACK {
-        // empty List
-        rbrack := p.nextToken()
-        return &ListExpr{Lbrack: lbrack, Rbrack: rbrack}
-    }
 
-    x := p.parseTest()
 
-    if p.tok == FOR {
-        // list comprehension
-        return p.parseComprehensionSuffix(lbrack, x, RBRACK)
-    }
-
-    exprs := []Expr{x}
-    if p.tok == COMMA {
-        // multi-item list literal
-        exprs = p.parseExprs(exprs, true) // allow trailing comma
-    }
-
-    rbrack := p.consume(RBRACK)
-    return &ListExpr{Lbrack: lbrack, List: exprs, Rbrack: rbrack}
-}
-
-// dict = '{' '}'
-//
-//	| '{' dict_entry_list '}'
-//	| '{' dict_entry FOR loop_variables IN expr '}'
-func (p *parser) parseDict() Expr {
-    lbrace := p.nextToken()
-    if p.tok == RBRACE {
-        // empty dict
-        rbrace := p.nextToken()
-        return &DictExpr{Lbrace: lbrace, Rbrace: rbrace}
-    }
-
-    x := p.parseDictEntry()
-
-    if p.tok == FOR {
-        // dict comprehension
-        return p.parseComprehensionSuffix(lbrace, x, RBRACE)
-    }
-
-    entries := []Expr{x}
-    for p.tok == COMMA {
-        p.nextToken()
-        if p.tok == RBRACE {
-            break
-        }
-        entries = append(entries, p.parseDictEntry())
-    }
-
-    rbrace := p.consume(RBRACE)
-    return &DictExpr{Lbrace: lbrace, List: entries, Rbrace: rbrace}
-}
-
-// dict_entry = test ':' test
-func (p *parser) parseDictEntry() *DictEntry {
-    k := p.parseTest()
-    colon := p.consume(COLON)
-    v := p.parseTest()
-    return &DictEntry{Key: k, Colon: colon, Value: v}
-}
-
-// comp_suffix = FOR loopvars IN expr comp_suffix
-//
-//	| IF expr comp_suffix
-//	| ']'  or  ')'                              (end)
-//
-// There can be multiple FOR/IF clauses; the first is always a FOR.
-func (p *parser) parseComprehensionSuffix(lbrace Position, body Expr, endBrace Token) Expr {
-    var clauses []Node
-    for p.tok != endBrace {
-        if p.tok == FOR {
-            pos := p.nextToken()
-            vars := p.parseForLoopVariables()
-            in := p.consume(IN)
-            // Following Python 3, the operand of IN cannot be:
-            // - a conditional expression ('x if y else z'),
-            //   due to conflicts in Python grammar
-            //  ('if' is used by the comprehension);
-            // - a lambda expression
-            // - an unparenthesized tuple.
-            x := p.parseTestPrec(0)
-            clauses = append(clauses, &ForClause{For: pos, Vars: vars, In: in, X: x})
-        } else if p.tok == IF {
-            pos := p.nextToken()
-            cond := p.parseTestNoCond()
-            clauses = append(clauses, &IfClause{If: pos, Cond: cond})
-        } else {
-            p.in.errorf(p.in.pos, "got %#v, want '%s', for, or if", p.tok, endBrace)
-        }
-    }
-    rbrace := p.nextToken()
-
-    return &Comprehension{
-        Curly:   endBrace == RBRACE,
-        Lbrack:  lbrace,
-        Body:    body,
-        Clauses: clauses,
-        Rbrack:  rbrace,
-    }
-}
-
-func terminatesExprList(tok Token) bool {
-    switch tok {
-    case EOF, NEWLINE, EQ, RBRACE, RBRACK, RPAREN, SEMI:
-        return true
-    }
-    return false
-}
 
 // Comment assignment.
 // We build two lists of all subnodes, preorder and postorder.
@@ -1151,16 +1570,16 @@ func flattenAST(root Node) (pre, post []Node) {
 }
 
 // assignComments attaches comments to nearby syntax.
-func (p *parser) assignComments(n Node) {
+fn  assignComments(n Node) {
     // Leave early if there are no comments
-    if len(p.in.lineComments)+len(p.in.suffixComments) == 0 {
+    if len(self.in.lineComments)+len(self.in.suffixComments) == 0 {
         return
     }
 
     pre, post := flattenAST(n)
 
     // Assign line comments to syntax immediately following.
-    line := p.in.lineComments
+    line := self.in.lineComments
     for _, x := range pre {
         start, _ := x.Span()
 
@@ -1183,7 +1602,7 @@ func (p *parser) assignComments(n Node) {
     }
 
     // Assign suffix comments to syntax immediately before.
-    suffix := p.in.suffixComments
+    suffix := self.in.suffixComments
     for i := len(post) - 1; i >= 0; i-- {
         x := post[i]
 
