@@ -122,11 +122,6 @@ impl Token {
         };
         return Some(prec);
     }
-
-    fn phf_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash;
-        std::mem::discriminant(self).hash(state);
-    }
 }
 
 impl Eq for Token {}

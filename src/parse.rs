@@ -19,8 +19,9 @@ const DEBUG: bool = false;
 // A Mode value is a set of flags (or 0) that controls optional parser functionality.
 type Mode = u16;
 
-const MODE_PLAIN: Mode = 0;
-const RETAIN_COMMENTS: Mode = 1; // retain comments in AST; see Node.Comments
+pub const MODE_PLAIN: Mode = 0;
+// not implemented
+pub const RETAIN_COMMENTS: Mode = 1; // retain comments in AST; see Node.Comments
 
 // Parse parses the input data and returns the corresponding parse tree.
 //

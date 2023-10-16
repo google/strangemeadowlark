@@ -145,9 +145,7 @@ impl<'a> Display for StmtData<'a> {
                 write!(f, "))")
             }
             StmtData::WhileStmt {
-                while_pos,
-                cond,
-                body,
+                cond: _, body: _, ..
             } => todo!(),
             StmtData::IfStmt {
                 cond,
@@ -289,7 +287,7 @@ pub enum ExprData<'a> {
 impl<'a> Display for ExprData<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExprData::BinaryExpr { x, op_pos, op, y } => {
+            ExprData::BinaryExpr { x, op, y, .. } => {
                 write!(f, "(BinaryExpr X={} Op={} Y={})", x.data, op, y.data)
             }
             ExprData::CallExpr { func, args, .. } => {
