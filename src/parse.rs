@@ -19,6 +19,7 @@ const DEBUG: bool = false;
 // A Mode value is a set of flags (or 0) that controls optional parser functionality.
 type Mode = u16;
 
+const MODE_PLAIN: Mode = 0;
 const RETAIN_COMMENTS: Mode = 1; // retain comments in AST; see Node.Comments
 
 // Parse parses the input data and returns the corresponding parse tree.
@@ -38,6 +39,17 @@ pub fn parse<'b, P: AsRef<Path>>(
     let f: &'b FileUnit<'b> = p.parse_file(path.as_ref())?;
     //p.assign_comments(f)?;
     Ok(f)
+}
+
+pub fn parse_expr<'b, P: AsRef<Path>>(
+    bump: &'b Bump,
+    path: &'b P,
+    src: &'b str,
+    mode: Mode,
+) -> Result<&'b Expr<'b>> {
+    let mut p = Parser::new(bump, path, src, mode)?;
+    p.parse_expr(false)
+    //p.assign_comments(f)?;
 }
 
 struct Parser<'a, 'b>
@@ -167,8 +179,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         // Collect "elif" statements and connect them later.
         let mut elifs = vec![];
         while self.tok.kind == Token::Elif {
-            self.next_token()?;
-            let elif_pos = self.pos.clone(); // consume ELIF
+            let elif_pos = self.next_token()?;
+            // = self.pos.clone(); // consume ELIF
             let cond = self.parse_test()?;
             self.consume(Token::Colon)?;
             let body = self.parse_suite()?;
@@ -186,8 +198,31 @@ impl<'a, 'b> Parser<'a, 'b> {
                 },
             }));
         }
+        let mut else_arm = None;
+        if self.tok.kind == Token::Else {
+            let else_pos = Some(self.next_token()?); // consume ELSE
+            self.consume(Token::Colon)?;
+            else_arm = Some((else_pos, self.parse_suite()?));
+            //else_arm =s.push(else_arm);
+        }
         if !elifs.is_empty() {
-            let mut last = elifs.pop().unwrap();
+            let mut tmp = elifs.pop().unwrap();
+            match else_arm {
+                Some((last_else_pos, last_else_arm)) => match tmp {
+                    Stmt {
+                        data:
+                            IfStmt {
+                                else_pos, else_arm, ..
+                            },
+                        ..
+                    } => {
+                        *else_pos = last_else_pos;
+                        *else_arm = last_else_arm;
+                    }
+                    _ => unreachable!(),
+                },
+                _ => {}
+            }
             while !elifs.is_empty() {
                 let next_last_if = elifs.pop().unwrap();
                 match next_last_if {
@@ -198,9 +233,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                             },
                         ..
                     } => {
-                        *else_pos = Some(last.span.start.clone());
-                        *else_arm = self.bump.alloc_slice_copy(&[&*last]);
-                        last = next_last_if;
+                        *else_pos = Some(tmp.span.start.clone());
+                        *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
+                        tmp = next_last_if;
                     }
                     _ => unreachable!(),
                 }
@@ -213,28 +248,30 @@ impl<'a, 'b> Parser<'a, 'b> {
                         },
                     ..
                 } => {
-                    *else_pos = Some(last.span.start.clone());
-                    *else_arm = self.bump.alloc_slice_copy(&[&*last]);
+                    *else_pos = Some(tmp.span.start.clone());
+                    *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
                 }
                 _ => unreachable!(),
             }
-        }
-        if self.tok.kind == Token::Else {
-            match if_stmt {
-                Stmt {
-                    data:
-                        IfStmt {
-                            else_pos, else_arm, ..
-                        },
-                    ..
-                } => {
-                    *else_pos = Some(self.next_token()?); // consume ELSE
-                    self.consume(Token::Colon)?;
-                    *else_arm = self.parse_suite()?;
-                }
-                _ => unreachable!(),
+        } else {
+            match else_arm {
+                Some((last_else_pos, last_else_arm)) => match if_stmt {
+                    Stmt {
+                        data:
+                            IfStmt {
+                                else_pos, else_arm, ..
+                            },
+                        ..
+                    } => {
+                        *else_pos = last_else_pos;
+                        *else_arm = last_else_arm;
+                    }
+                    _ => unreachable!(),
+                },
+                _ => {}
             }
         }
+
         Ok(if_stmt)
     }
 
@@ -334,14 +371,14 @@ impl<'a, 'b> Parser<'a, 'b> {
                 break; // allow trailing comma
             }
             //let pos = self.pos.clone();
-            match self.tok.kind {
+            match self.tok.kind.clone() {
                 Token::String { decoded } => {
                     // load("module", "id")
                     // To name is same as original.
                     let lit = self.parse_primary()?; //.(*Literal)
                     let id = self.bump.alloc(Ident {
                         name_pos: lit.span.start.clone(),
-                        name: decoded.clone(),
+                        name: decoded,
                     });
                     to.push(id);
                     from.push(id);
@@ -433,7 +470,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 break;
             }
         }
-        // EOF without NEWLINE occurs in `if x: pass`, for example.
+        // EOF without NEWLINE occurs in `if x: pass", for example.
         if self.tok.kind != Token::Eof && consume_nl {
             self.consume(Token::Newline)?;
         }
@@ -471,7 +508,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 return Ok(return_stmt);
             }
             Token::Break | Token::Continue | Token::Pass => {
-                let tok = self.tok.kind;
+                let tok = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume it
                 let branch_stmt = self.bump.alloc(Stmt {
                     span: Span {
@@ -488,7 +525,6 @@ impl<'a, 'b> Parser<'a, 'b> {
             Token::Load => return self.parse_load_stmt(),
             _ => {}
         }
-
         // Assignment
         let pos = self.pos.clone();
         let x = self.parse_expr(false)?;
@@ -574,7 +610,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     fn parse_ident(&mut self) -> Result<&'b Ident> {
-        match self.tok.kind {
+        match self.tok.kind.clone() {
             Token::Ident { name } => {
                 let id = self.bump.alloc(Ident {
                     name_pos: self.tok.pos.clone(),
@@ -621,7 +657,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
             // * or *args or **kwargs
             if self.tok.kind == Token::Star || self.tok.kind == Token::StarStar {
-                let op = self.tok.kind;
+                let op = self.tok.kind.clone();
                 let op_pos = self.next_token()?;
                 let (x, end) =
                     if op == Token::StarStar || matches!(self.tok.kind, Token::Ident { .. }) {
@@ -652,8 +688,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let dflt = self.parse_test()?;
                 let binary_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: id.span.start,
-                        end: dflt.span.end,
+                        start: id.span.start.clone(),
+                        end: dflt.span.end.clone(),
                     },
                     data: ExprData::BinaryExpr {
                         x: id,
@@ -726,6 +762,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             | Token::Float { .. }
             | Token::String { .. }
             | Token::Bytes { .. } => {
+                let token = self.tok.kind.clone();
+                let token_pos = self.pos.clone();
+                let raw = self.tok.raw.clone();
                 let pos = self.next_token()?;
                 let literal = self.bump.alloc(Expr {
                     span: Span {
@@ -733,9 +772,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                         end: pos.clone(),
                     },
                     data: ExprData::Literal {
-                        token: self.tok.kind.clone(),
-                        token_pos: pos,
-                        raw: self.tok.raw,
+                        token,
+                        token_pos,
+                        raw,
                     },
                 });
                 return Ok(literal);
@@ -1083,12 +1122,12 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     fn parse_test_prec(&mut self, prec: usize) -> Result<&'b Expr<'b>> {
-        if prec >= MAX_PREC {
+        if prec >= SUP_PREC {
             return self.parse_primary_with_suffix();
         }
 
         // expr = NOT expr
-        if self.tok.kind == Token::Not && prec == Token::Not.precedence() {
+        if self.tok.kind == Token::Not && prec == Token::Not.precedence().unwrap() {
             let op_pos = self.next_token()?;
             let x = self.parse_test_prec(prec)?;
             let unary_expr = self.bump.alloc(Expr {
@@ -1123,7 +1162,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
             // *args or **kwargs
             if self.tok.kind == Token::Star || self.tok.kind == Token::StarStar {
-                let op = self.tok.kind;
+                let op = self.tok.kind.clone();
                 let op_pos = self.next_token()?;
                 let x = self.parse_test()?;
                 let unary_expr = self.bump.alloc(Expr {
@@ -1212,14 +1251,13 @@ impl<'a, 'b> Parser<'a, 'b> {
 
             // Binary operator of specified precedence?
             let op_prec = self.tok.kind.precedence();
-            if op_prec < prec {
+            if op_prec.is_none() || op_prec.unwrap() < prec {
                 let x = self.bump.alloc(x);
                 return Ok(&*x);
             }
-
             // Comparisons are non-associative.
             if !first && op_prec == Token::Eq.precedence() {
-                match x.data {
+                match &x.data {
                     ExprData::BinaryExpr { op, .. } => {
                         return Err(anyhow!(
                             "{} {} does not associate with {} (use parens)",
@@ -1231,8 +1269,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                     _ => unreachable!(),
                 }
             }
+            let op_prec = op_prec.unwrap();
 
-            let op = self.tok.kind;
+            let op = self.tok.kind.clone();
             let op_pos = self.next_token()?;
             let y = self.parse_test_prec(op_prec + 1)?;
             let binary_expr = self.bump.alloc(Expr {
@@ -1350,199 +1389,7 @@ fn terminates_expr_list(tok: &Token) -> bool {
     }
 }
 
-//impl<'a> Parser<'a> {
-//fn assign_comments<'b, T>(&'a mut self, f: &'b mut T) -> Result<&'b mut T> {
-// fn assign_comments<T>(&mut self, f: &'a mut T) -> Result<&'a mut T> {
-//    Ok(f) // todo
-//}
-//}
-
 /*
-// ParseCompoundStmt calls the ParseCompoundStmt method of LegacyFileOptions().
-// Deprecated: relies on legacy global variables.
-func ParseCompoundStmt(filename string, readline func() ([]byte, error)) (f *File, err error) {
-    return LegacyFileOptions().ParseCompoundStmt(filename, readline)
-}
-
-// ParseCompoundStmt parses a single compound statement:
-// a blank line, a def, for, while, or if statement, or a
-// semicolon-separated list of simple statements followed
-// by a newline. These are the units on which the REPL operates.
-// ParseCompoundStmt does not consume any following input.
-// The parser calls the readline function each
-// time it needs a new line of input.
-func (opts *FileOptions) ParseCompoundStmt(filename string, readline func() ([]byte, error)) (f *File, err error) {
-    in, err := newScanner(filename, readline, false)
-    if err != nil {
-        return nil, err
-    }
-
-    p := parser{options: opts, in: in}
-    defer p.in.recover(&err)
-
-    self.next_token() // read first lookahead token
-
-    var stmts []Stmt
-    switch self.tok {
-    case DEF, IF, FOR, WHILE:
-        stmts = self.parseStmt(stmts)
-    case NEWLINE:
-        // blank line
-    default:
-        stmts = self.parseSimpleStmt(stmts, false)
-        // Require but don't consume newline, to avoid blocking again.
-        if self.tok != NEWLINE {
-            self.in.errorf(self.in.pos, "invalid syntax")
-        }
-    }
-
-    return &File{Options: opts, Path: filename, Stmts: stmts}, nil
-}
-
-// ParseExpr calls the ParseExpr method of LegacyFileOptions().
-// Deprecated: relies on legacy global variables.
-func ParseExpr(filename string, src interface{}, mode Mode) (expr Expr, err error) {
-    return LegacyFileOptions().ParseExpr(filename, src, mode)
-}
-
-// ParseExpr parses a Starlark expression.
-// A comma-separated list of expressions is parsed as a tuple.
-// See Parse for explanation of parameters.
-func (opts *FileOptions) ParseExpr(filename string, src interface{}, mode Mode) (expr Expr, err error) {
-    in, err := newScanner(filename, src, mode&RetainComments != 0)
-    if err != nil {
-        return nil, err
-    }
-    p := parser{options: opts, in: in}
-    defer self.in.recover(&err)
-
-    self.next_token() // read first lookahead token
-
-    // Use parseExpr, not parse_test, to permit an unparenthesized tuple.
-    expr = self.parseExpr(false)
-
-    // A following newline (e.g. "f()\n") appears outside any brackets,
-    // on a non-blank line, and thus results in a NEWLINE token.
-    if self.tok == NEWLINE {
-        self.next_token()
-    }
-
-    if self.tok != EO// primary_with_suffix = primary
-//
-//	| primary '.' IDENT
-//	| primary slice_suffix
-//	| primary call_suffix
-fn  parsePrimaryWithSuffix() Expr {
-    x := self.parsePrimary()
-    for {
-        switch self.tok {
-        case DOT:
-            dot := self.next_token()
-            id := self.parse_ident()
-            x = &DotExpr{Dot: dot, X: x, Name: id}
-        case LBRACK:
-            x = self.parseSliceSuffix(x)
-        case LPAREN:
-            x = self.parseCallSuffix(x)
-        default:
-            return x
-        }
-    }
-}
-F {
-        self.in.errorf(self.in.pos, "got %#v after expression, want EOF", self.tok)
-    }
-    self.assignComments(expr)
-    return expr, nil
-}
-
-
-
-
-
-
-fn  consume(t Token) Position {
-    if self.tok != t {
-        self.in.errorf(self.in.pos, "got %#v, want %#v", self.tok, t)
-    }
-    return self.next_token()
-}
-
-
-
-
-
-
-
-
-// primary = IDENT
-//
-//	| INT | FLOAT | STRING | BYTES
-//	| '[' ...                    // list literal or comprehension
-//	| '{' ...                    // dict literal or comprehension
-//	| '(' ...                    // tuple or parenthesized expression
-//	| ('-'|'+'|'~') primary_with_suffix
-fn  parsePrimary() Expr {
-    switch self.tok {
-    case IDENT:
-        return self.parse_ident()
-
-    case INT, FLOAT, STRING, BYTES:
-        var val interface{}
-        tok := self.tok
-        switch tok {
-        case INT:
-            if self.tokval.bigInt != nil {
-                val = self.tokval.bigInt
-            } else {
-                val = self.tokval.int
-            }
-        case FLOAT:
-            val = self.tokval.float
-        case STRING, BYTES:
-            val = self.tokval.string
-        }
-        raw := self.tokval.raw
-        pos := self.next_token()
-        return &Literal{Token: tok, TokenPos: pos, Raw: raw, Value: val}
-
-    case LBRACK:
-        return self.parseList()
-
-    case LBRACE:
-        return self.parseDict()
-
-    case LPAREN:
-        lparen := self.next_token()
-        if self.tok == RPAREN {
-            // empty tuple
-            rparen := self.next_token()
-            return &TupleExpr{Lparen: lparen, Rparen: rparen}
-        }
-        e := self.parseExpr(true) // allow trailing comma
-        rparen := self.consume(RPAREN)
-        return &ParenExpr{
-            Lparen: lparen,
-            X:      e,
-            Rparen: rparen,
-        }
-
-    case MINUS, PLUS, TILDE: // unary
-        tok := self.tok
-        pos := self.next_token()
-        x := self.parsePrimaryWithSuffix()
-        return &UnaryExpr{
-            OpPos: pos,
-            Op:    tok,
-            X:     x,
-        }
-    }
-    self.in.errorf(self.in.pos, "got %#v, want primary expression", self.tok)
-    panic("unreachable")
-}
-
-
-
 
 // Comment assignment.
 // We build two lists of all subnodes, preorder and postorder.
@@ -1621,3 +1468,288 @@ fn  assignComments(n Node) {
     }
 }
  */
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+    struct TestCase {
+        input: &'static str,
+        want: &'static str, //&'b Expr<'b>,
+    }
+
+    #[test]
+    pub fn test_expr_parse_trees() {
+        let bump = super::Bump::new();
+        let test_cases = vec![
+            TestCase {
+                input: "print(1)",
+                want: "(CallExpr Fn=print Args=(1,))",
+            },
+            TestCase {
+                input: "x + 1",
+                want: "(BinaryExpr X=x Op=+ Y=1)",
+            },
+            TestCase {
+                input: "[x for x in y]",
+                want: "(Comprehension Body=x Clauses=((ForClause Vars=x X=y),))",
+            },
+            TestCase {
+                input: "[x for x in (a if b else c)]",
+                want: "(Comprehension Body=x Clauses=((ForClause Vars=x X=(ParenExpr X=(CondExpr Cond=b True=a False=c))),))",
+            },
+            TestCase{
+                input:"x[i].f(42)",
+                want: "(CallExpr Fn=(DotExpr X=(IndexExpr X=x Y=i) Name=f) Args=(42,))"
+            },
+            TestCase{
+                input:"x.f()",
+                want: "(CallExpr Fn=(DotExpr X=x Name=f) Args=())",
+            },
+            TestCase{
+                input:"x+y*z",
+                want: "(BinaryExpr X=x Op=+ Y=(BinaryExpr X=y Op=* Y=z))",
+            },
+            TestCase{
+                input:"x%y-z",
+                want: "(BinaryExpr X=(BinaryExpr X=x Op=% Y=y) Op=- Y=z)",
+            },
+            TestCase{
+                input:"a + b not in c",
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=+ Y=b) Op=not in Y=c)",
+            },
+            TestCase{
+                input:"lambda x, *args, **kwargs: None",
+                want: "(LambdaExpr Params=(x,(UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),) Body=None)",
+            },
+            TestCase{ input:r#"{"one": 1}"#,
+                want: r#"(DictExpr List=((DictEntry Key="one" Value=1),))"#
+            },
+            TestCase{ input:"a[i]",
+                want: "(IndexExpr X=a Y=i)"},
+            TestCase{ input:"a[i:]",
+                want: "(SliceExpr X=a Lo=i)"},
+                TestCase{ input:"a[:j]",
+                want: "(SliceExpr X=a Hi=j)"},
+            TestCase{ input:"a[::]",
+                want: "(SliceExpr X=a)"},
+            TestCase{ input:"a[::k]",
+                want: "(SliceExpr X=a Step=k)"},
+                TestCase{ input:"[]",
+                want: "(ListExpr List=())"},
+            TestCase{ input:"[1]",
+                want: "(ListExpr List=(1,))"},
+            TestCase{ input:"[1,]",
+                want: "(ListExpr List=(1,))"},
+            TestCase{ input:"[1, 2]",
+                want: "(ListExpr List=(1,2,))"},
+                TestCase{ input:"()",
+                want: "(TupleExpr List=())"},
+            TestCase{ input:"(4,)",
+                want: "(ParenExpr X=(TupleExpr List=(4,)))"},
+            TestCase{ input:"(4)",
+                want: "(ParenExpr X=4)"},
+                TestCase{ input:"(4, 5)",
+                want: "(ParenExpr X=(TupleExpr List=(4,5,)))"},
+            TestCase{ input:"1, 2, 3",
+                want: "(TupleExpr List=(1,2,3,))"},
+            //TestCase{ input:"1, 2,",
+            //    "unparenthesized tuple with trailing comma"},
+            TestCase{
+                input:"{}",
+                want: "(DictExpr List=())"},
+            TestCase{
+                input:r#"{"a": 1}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#},
+            TestCase{
+                input:r#"{"a": 1,}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#},
+            TestCase{
+                input:r#"{"a": 1, "b": 2}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),(DictEntry Key="b" Value=2),))"#},
+                //TestCase{ input:"{x: y for (x, y) in z}",
+                //want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=(ParenExpr X=(TupleExpr List=(x y))) X=z)))"},
+            //TestCase{ input:"{x: y for a in b if c}",
+                //want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=a X=b) (IfClause Cond=c)))"},
+                TestCase{ input:"-1 + +2",
+                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=+ Y=(UnaryExpr Op=+ X=2))"},
+                TestCase{ input:r#""foo" + "bar""#,
+                want: r#"(BinaryExpr X="foo" Op=+ Y="bar")"#},
+            TestCase{ input:"-1 * 2", // prec(unary -) > prec(binary *)
+                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=* Y=2)"},
+            TestCase{ input:"-x[i]", // prec(unary -) < prec(x[i])
+                want: "(UnaryExpr Op=- X=(IndexExpr X=x Y=i))"},
+                TestCase{ input:"a | b & c | d", // prec(|) < prec(&)
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=| Y=(BinaryExpr X=b Op=& Y=c)) Op=| Y=d)"},
+            TestCase{ input:"a or b and c or d",
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=or Y=(BinaryExpr X=b Op=and Y=c)) Op=or Y=d)"},
+            TestCase{ input:"a and b or c and d",
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=and Y=b) Op=or Y=(BinaryExpr X=c Op=and Y=d))"},
+                TestCase{ input:"f(1, x=y)",
+                want: "(CallExpr Fn=f Args=(1,(BinaryExpr X=x Op== Y=y),))"},
+            TestCase{ input:"f(*args, **kwargs)",
+                want: "(CallExpr Fn=f Args=((UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),))"},
+            TestCase{ input:"lambda *args, *, x=1, **kwargs: 0",
+                want: "(LambdaExpr Params=((UnaryExpr Op=* X=args),(UnaryExpr Op=*),(BinaryExpr X=x Op== Y=1),(UnaryExpr Op=** X=kwargs),) Body=0)"},
+                TestCase{ input:"lambda *, a, *b: 0",
+                want: "(LambdaExpr Params=((UnaryExpr Op=*),a,(UnaryExpr Op=* X=b),) Body=0)"},
+            TestCase{ input:"a if b else c",
+                want: "(CondExpr Cond=b True=a False=c)"},
+                TestCase{ input:"a and not b",
+                want: "(BinaryExpr X=a Op=and Y=(UnaryExpr Op=not X=b))"},
+                TestCase{ input:"[e for x in y if cond1 if cond2]",
+                want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))"}, // github.com/google/skylark/issues/53
+                ];
+        for test_case in test_cases {
+            match super::parse_expr(&bump, &"foo.star", test_case.input, MODE_PLAIN) {
+                Ok(expr) => {
+                    let s = format!("{}", expr.data);
+                    assert_eq!(s, test_case.want)
+                }
+                Err(msg) => assert!(false, "{}", msg),
+            }
+        }
+    }
+
+    #[test]
+    fn test_stmt_parse_trees() {
+        let bump = super::Bump::new();
+        let test_cases = vec![
+            TestCase {
+                input: "print(1)",
+                want: "(ExprStmt X=(CallExpr Fn=print Args=(1,)))",
+            },
+            TestCase {
+                input: "return 1, 2",
+                want: "(ReturnStmt Result=(TupleExpr List=(1,2,)))",
+            },
+            TestCase {
+                input: "return",
+                want: "(ReturnStmt)",
+            },
+            TestCase {
+                input: r#"for i in "abc": break"#,
+                want: r#"(ForStmt Vars=i X="abc" Body=((BranchStmt Token=break),))"#,
+            },
+            TestCase {
+                input: r#"for i in "abc": continue"#,
+                want: r#"(ForStmt Vars=i X="abc" Body=((BranchStmt Token=continue),))"#,
+            },
+            TestCase {
+                input: "for x, y in z: pass",
+                want: "(ForStmt Vars=(TupleExpr List=(x,y,)) X=z Body=((BranchStmt Token=pass),))",
+            },
+            TestCase {
+                input: "if True: pass",
+                want: "(IfStmt Cond=True True=((BranchStmt Token=pass),) False=())",
+            },
+            TestCase {
+                input: "if True: break",
+                want: "(IfStmt Cond=True True=((BranchStmt Token=break),) False=())",
+            },
+            TestCase {
+                input: "if True: continue",
+                want: "(IfStmt Cond=True True=((BranchStmt Token=continue),) False=())",
+            },
+            TestCase{
+                input: "if True: pass
+else:
+                  pass",
+                          want: "(IfStmt Cond=True True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),))",
+              },
+              TestCase{
+                  input:"if a: pass\nelif b: pass\nelse: pass",
+                  want: "(IfStmt Cond=a True=((BranchStmt Token=pass),) False=((IfStmt Cond=b True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),)),))",
+              },
+              TestCase{
+                input: "x, y = 1, 2",
+                want: "(AssignStmt Op== LHS=(TupleExpr List=(x,y,)) RHS=(TupleExpr List=(1,2,)))",
+              },
+              TestCase{
+                input: "x[i] = 1",
+                want: "(AssignStmt Op== LHS=(IndexExpr X=x Y=i) RHS=1)",
+              },
+              TestCase{
+                input: "x.f = 1",
+                want: "(AssignStmt Op== LHS=(DotExpr X=x Name=f) RHS=1)",
+              },
+              TestCase{
+                input: "(x, y) = 1",
+                want: "(AssignStmt Op== LHS=(ParenExpr X=(TupleExpr List=(x,y,))) RHS=1)",
+              },
+              TestCase{
+                input: r#"load("", "a", b="c")"#,
+                want: r#"(LoadStmt From=(a,c,) To=(a,b,))"#,
+              },
+              TestCase{
+                input: r#"if True: load("", "a", b="c")"#, // load needn't be at toplevel
+                want: "(IfStmt Cond=True True=((LoadStmt From=(a,c,) To=(a,b,)),) False=())",
+              },
+              TestCase{
+                input: "def f(x, *args, **kwargs):
+  pass",
+                want: "(DefStmt Name=f Params=(x,(UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),) Body=((BranchStmt Token=pass),))",
+              },
+              TestCase{
+                input: "def f(**kwargs, *args): pass",
+                want: "(DefStmt Name=f Params=((UnaryExpr Op=** X=kwargs),(UnaryExpr Op=* X=args),) Body=((BranchStmt Token=pass),))",
+              },
+              TestCase{
+                input: "def f(a, b, c=d): pass",
+                want: "(DefStmt Name=f Params=(a,b,(BinaryExpr X=c Op== Y=d),) Body=((BranchStmt Token=pass),))",
+              },
+              TestCase{
+                input: "def f(a, b=c, d): pass",
+                want: "(DefStmt Name=f Params=(a,(BinaryExpr X=b Op== Y=c),d,) Body=((BranchStmt Token=pass),))",
+              }
+        ];
+        for test_case in test_cases {
+            match super::parse(&bump, &"foo.star", test_case.input, MODE_PLAIN) {
+                Ok(file_unit) if file_unit.stmts.len() == 1 => {
+                    let s = format!("{}", file_unit.stmts[0].data);
+                    assert_eq!(s, test_case.want)
+                }
+                Ok(file_unit) => assert!(false, "not one stmt: {:?}", file_unit),
+                Err(msg) => assert!(false, "{}", msg),
+            }
+        }
+    }
+    /*
+            TestCase{
+      input: "def f(a, b=c, d): pass",
+                want: "DefStmt Name=f Params=(a (BinaryExpr X=b Op== Y=c) d) Body=((BranchStmt Token=pass)))",
+    } // TODO(adonovan): fix this
+            TestCase{
+      input: "def f():
+        def g():
+            pass
+        pass
+    def h():
+        pass",
+                want: "DefStmt Name=f Body=((DefStmt Name=g Body=((BranchStmt Token=pass))) (BranchStmt Token=pass)))",
+    }
+            {"f();g()",
+                want: "ExprStmt X=(CallExpr Fn=f))",
+    }
+            {"f();",
+                want: "ExprStmt X=(CallExpr Fn=f))",
+    }
+            {"f();g()\n",
+                want: "ExprStmt X=(CallExpr Fn=f))",
+    }
+            {"f();\n",
+                want: "ExprStmt X=(CallExpr Fn=f))",
+    }
+        } {
+            f, err := syntax.Parse("foo.star", test.input, 0)
+            if err != nil {
+                t.Errorf("parse `%s` failed: %v", test.input, stripPos(err))
+                continue
+            }
+            if got := treeString(f.Stmts[0]); test.want != got {
+                t.Errorf("parse `%s` = %s, want %s", test.input, got, test.want)
+            }
+        }
+    }
+     */
+}

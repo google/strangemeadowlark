@@ -86,7 +86,7 @@ pub enum Token {
     While,
 }
 
-pub const MAX_PREC: usize = 9;
+pub const SUP_PREC: usize = 10;
 
 impl Token {
     // precedence maps each operator to its precedence (0-7), or -1 for other tokens.
@@ -94,12 +94,12 @@ impl Token {
     // Comparisons are nonassociative; other binary operators associate to the left.
     // Unary MINUS, unary PLUS, and TILDE have higher precedence so are handled in parsePrimary.
     // See https://github.com/google/starlark-go/blob/master/doc/spec.md#binary-operators
-    pub fn precedence(&self) -> usize {
-        match self {
+    pub fn precedence(&self) -> Option<usize> {
+        let prec = match self {
             Token::Or => 0,
             Token::And => 1,
             Token::Not => 2,
-            Token::Eq => 3,
+            Token::EqEq => 3,
             Token::Neq => 3,
             Token::Lt => 3,
             Token::Gt => 3,
@@ -118,8 +118,9 @@ impl Token {
             Token::Percent => 9,
             Token::Slash => 9,
             Token::SlashSlash => 9,
-            _ => 0,
-        }
+            _ => return None,
+        };
+        return Some(prec);
     }
 
     fn phf_hash<H: std::hash::Hasher>(&self, state: &mut H) {

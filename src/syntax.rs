@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fmt::Display, path::Path};
 
 use crate::{
     scan::{Comment, Position},
@@ -12,6 +12,7 @@ trait NodeData {
     fn add_comment(&mut self, comment: Comment);
 }
 
+#[derive(Debug)]
 pub struct FileUnit<'a> {
     pub path: &'a Path,
     pub stmts: &'a [&'a Stmt<'a>],
@@ -35,12 +36,12 @@ impl<'a> NodeData for FileUnit<'a> {
         todo!()
     }
 
-    fn add_comment(&mut self, comment: Comment) {
+    fn add_comment(&mut self, _comment: Comment) {
         todo!()
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Span {
     pub start: Position,
     pub end: Position,
@@ -52,11 +53,13 @@ pub struct Comments {
     pub suffix: Vec<Comment>,
 }
 
+#[derive(Debug)]
 pub struct Stmt<'a> {
     pub span: Span,
     pub data: StmtData<'a>,
 }
 
+#[derive(Debug)]
 pub enum StmtData<'a> {
     // op is one of EQ | {PLUS,MINUS,STAR,PERCENT}_EQ
     AssignStmt {
@@ -111,10 +114,84 @@ pub enum StmtData<'a> {
     },
 }
 
+impl<'a> Display for StmtData<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StmtData::AssignStmt { op, lhs, rhs, .. } => write!(
+                f,
+                "(AssignStmt Op={} LHS={} RHS={})",
+                op, lhs.data, rhs.data
+            ),
+            StmtData::BranchStmt { token, .. } => write!(f, "(BranchStmt Token={})", token),
+            StmtData::DefStmt {
+                name, params, body, ..
+            } => {
+                write!(f, "(DefStmt Name={} Params=(", name.name)?;
+                for p in params.iter() {
+                    write!(f, "{},", p.data)?;
+                }
+                write!(f, ") Body=(")?;
+                for stmt in body.iter() {
+                    write!(f, "{},", stmt.data)?;
+                }
+                write!(f, "))",)
+            }
+            StmtData::ExprStmt { x } => write!(f, "(ExprStmt X={})", x.data),
+            StmtData::ForStmt { vars, x, body, .. } => {
+                write!(f, "(ForStmt Vars={} X={} Body=(", vars.data, x.data)?;
+                for stmt in body.iter() {
+                    write!(f, "{},", stmt.data)?;
+                }
+                write!(f, "))")
+            }
+            StmtData::WhileStmt {
+                while_pos,
+                cond,
+                body,
+            } => todo!(),
+            StmtData::IfStmt {
+                cond,
+                then_arm,
+                else_arm,
+                ..
+            } => {
+                write!(f, "(IfStmt Cond={} True=(", cond.data)?;
+                for stmt in then_arm.iter() {
+                    write!(f, "{},", stmt.data)?;
+                }
+                write!(f, ") False=(")?;
+                for stmt in else_arm.iter() {
+                    write!(f, "{},", stmt.data)?;
+                }
+                write!(f, "))")
+            }
+            StmtData::LoadStmt { from, to, .. } => {
+                write!(f, "(LoadStmt From=(")?;
+                for ident in from.iter() {
+                    write!(f, "{},", ident.name)?;
+                }
+                write!(f, ") To=(")?;
+                for ident in to.iter() {
+                    write!(f, "{},", ident.name)?;
+                }
+                write!(f, "))")
+            }
+            StmtData::ReturnStmt {
+                result: Some(result_expr),
+                ..
+            } => write!(f, "(ReturnStmt Result={})", result_expr.data),
+            StmtData::ReturnStmt { result: None, .. } => write!(f, "(ReturnStmt)"),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Expr<'a> {
     pub span: Span,
     pub data: ExprData<'a>,
 }
+
+#[derive(Debug)]
 
 pub enum ExprData<'a> {
     BinaryExpr {
@@ -209,7 +286,104 @@ pub enum ExprData<'a> {
     },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+impl<'a> Display for ExprData<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExprData::BinaryExpr { x, op_pos, op, y } => {
+                write!(f, "(BinaryExpr X={} Op={} Y={})", x.data, op, y.data)
+            }
+            ExprData::CallExpr { func, args, .. } => {
+                write!(f, "(CallExpr Fn={} Args=(", func.data)?;
+                for arg in args.iter() {
+                    write!(f, "{},", arg.data)?;
+                }
+                write!(f, "))")
+            }
+            ExprData::Comprehension { body, clauses, .. } => {
+                write!(f, "(Comprehension Body={} Clauses=(", body.data)?;
+                for clause in clauses.iter() {
+                    write!(f, "{},", clause)?;
+                }
+                write!(f, "))")
+            }
+            ExprData::CondExpr {
+                cond,
+                then_arm,
+                else_arm,
+                ..
+            } => {
+                write!(
+                    f,
+                    "(CondExpr Cond={} True={} False={})",
+                    cond.data, then_arm.data, else_arm.data
+                )
+            }
+            ExprData::DictEntry { key, value, .. } => {
+                write!(f, "(DictEntry Key={} Value={})", key.data, value.data)
+            }
+            ExprData::DictExpr { list, .. } => {
+                write!(f, "(DictExpr List=(")?;
+                for dict_entry in list.iter() {
+                    write!(f, "{},", dict_entry.data)?;
+                }
+                write!(f, "))")
+            }
+            ExprData::DotExpr { x, name, .. } => {
+                write!(f, "(DotExpr X={} Name={})", x.data, name.name)
+            }
+            ExprData::Ident(id) => write!(f, "{}", id.name),
+            ExprData::IndexExpr { x, y, .. } => {
+                write!(f, "(IndexExpr X={} Y={})", x.data, y.data)
+            }
+            ExprData::LambdaExpr { params, body, .. } => {
+                write!(f, "(LambdaExpr Params=(")?;
+                for param in params.iter() {
+                    write!(f, "{},", param.data)?;
+                }
+                write!(f, ") Body={})", body.data)
+            }
+            ExprData::ListExpr { list, .. } => {
+                write!(f, "(ListExpr List=(")?;
+                for expr in list.iter() {
+                    write!(f, "{},", expr.data)?;
+                }
+                write!(f, "))")
+            }
+            ExprData::Literal { token, .. } => write!(f, "{}", token),
+            ExprData::ParenExpr { x, .. } => {
+                write!(f, "(ParenExpr X={})", x.data)
+            }
+            ExprData::SliceExpr {
+                x, lo, hi, step, ..
+            } => {
+                write!(f, "(SliceExpr X={}", x.data)?;
+                if lo.is_some() {
+                    write!(f, " Lo={}", lo.unwrap().data)?;
+                }
+                if hi.is_some() {
+                    write!(f, " Hi={}", hi.unwrap().data)?;
+                }
+                if step.is_some() {
+                    write!(f, " Step={}", step.unwrap().data)?;
+                }
+                write!(f, ")")
+            }
+            ExprData::TupleExpr { list, .. } => {
+                write!(f, "(TupleExpr List=(")?;
+                for expr in list.iter() {
+                    write!(f, "{},", expr.data)?;
+                }
+                write!(f, "))")
+            }
+            ExprData::UnaryExpr { op, x, .. } => match x {
+                Some(x) => write!(f, "(UnaryExpr Op={} X={})", op, x.data),
+                _ => write!(f, "(UnaryExpr Op={})", op),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ident {
     pub name_pos: Position,
     pub name: String,
@@ -219,14 +393,15 @@ impl Ident {
     pub fn as_expr<'a>(&'a self) -> Expr<'a> {
         Expr {
             span: Span {
-                start: self.name_pos,
-                end: self.name_pos,
+                start: self.name_pos.clone(),
+                end: self.name_pos.clone(),
             },
             data: ExprData::Ident(self),
         }
     }
 }
 
+#[derive(Debug)]
 pub enum Clause<'a> {
     // A ForClause represents a for clause in a list comprehension: "for Vars in X".
     ForClause {
@@ -241,4 +416,15 @@ pub enum Clause<'a> {
         if_pos: Position,
         cond: &'a Expr<'a>,
     },
+}
+
+impl<'a> Display for Clause<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Clause::ForClause { vars, x, .. } => {
+                write!(f, "(ForClause Vars={} X={})", vars.data, x.data)
+            }
+            Clause::IfClause { cond, .. } => write!(f, "(IfClause Cond={})", cond.data),
+        }
+    }
 }

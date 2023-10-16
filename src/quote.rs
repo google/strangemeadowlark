@@ -16,22 +16,6 @@ static UNESC: phf::Map<char, u8> = phf_map! {
     '"' =>  '"' as u8,
 };
 
-/*
-// esc maps escape-worthy bytes to the char that should follow \.
-static esc: phf::Map<char, char> = phf_map! {
-    '\x07' => 'a',
-    '\x08' => 'b',
-    '\x0C' => 'f',
-    '\x0A' => 'n',
-    '\x0D' => 'r',
-    '\x09' => 't',
-    '\x0B' => 'v',
-    '\\' => '\\',
-    '\'' => '\'',
-    '"' =>  '"',
-};
- */
-
 pub enum DecodedSequence {
     String(String),
     Bytes(Vec<u8>),
