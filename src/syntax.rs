@@ -12,7 +12,7 @@ trait NodeData {
     fn add_comment(&mut self, comment: Comment);
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FileUnit<'a> {
     pub path: &'a Path,
     pub stmts: &'a [&'a Stmt<'a>],
@@ -41,7 +41,7 @@ impl<'a> NodeData for FileUnit<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Span {
     pub start: Position,
     pub end: Position,
@@ -57,6 +57,12 @@ pub struct Comments {
 pub struct Stmt<'a> {
     pub span: Span,
     pub data: StmtData<'a>,
+}
+
+impl<'a> PartialEq for Stmt<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
 }
 
 #[derive(Debug)]
@@ -112,6 +118,133 @@ pub enum StmtData<'a> {
         return_pos: Position,
         result: Option<&'a Expr<'a>>,
     },
+}
+
+impl<'a> PartialEq for StmtData<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::AssignStmt {
+                    op: l_op,
+                    lhs: l_lhs,
+                    rhs: l_rhs,
+                    ..
+                },
+                Self::AssignStmt {
+                    op: r_op,
+                    lhs: r_lhs,
+                    rhs: r_rhs,
+                    ..
+                },
+            ) => l_op == r_op && l_lhs == r_lhs && l_rhs == r_rhs,
+            (
+                Self::BranchStmt {
+                    token: l_token,
+                    token_pos: l_token_pos,
+                },
+                Self::BranchStmt {
+                    token: r_token,
+                    token_pos: r_token_pos,
+                },
+            ) => l_token == r_token && l_token_pos == r_token_pos,
+            (
+                Self::DefStmt {
+                    name: l_name,
+                    params: l_params,
+                    body: l_body,
+                    ..
+                },
+                Self::DefStmt {
+                    name: r_name,
+                    params: r_params,
+                    body: r_body,
+                    ..
+                },
+            ) => l_name == r_name && l_params == r_params && l_body == r_body,
+            (Self::ExprStmt { x: l_x }, Self::ExprStmt { x: r_x }) => l_x == r_x,
+            (
+                Self::ForStmt {
+                    for_pos: l_for_pos,
+                    vars: l_vars,
+                    x: l_x,
+                    body: l_body,
+                },
+                Self::ForStmt {
+                    for_pos: r_for_pos,
+                    vars: r_vars,
+                    x: r_x,
+                    body: r_body,
+                },
+            ) => l_for_pos == r_for_pos && l_vars == r_vars && l_x == r_x && l_body == r_body,
+            (
+                Self::WhileStmt {
+                    while_pos: l_while_pos,
+                    cond: l_cond,
+                    body: l_body,
+                },
+                Self::WhileStmt {
+                    while_pos: r_while_pos,
+                    cond: r_cond,
+                    body: r_body,
+                },
+            ) => l_while_pos == r_while_pos && l_cond == r_cond && l_body == r_body,
+            (
+                Self::IfStmt {
+                    if_pos: l_if_pos,
+                    cond: l_cond,
+                    then_arm: l_then_arm,
+                    else_pos: l_else_pos,
+                    else_arm: l_else_arm,
+                },
+                Self::IfStmt {
+                    if_pos: r_if_pos,
+                    cond: r_cond,
+                    then_arm: r_then_arm,
+                    else_pos: r_else_pos,
+                    else_arm: r_else_arm,
+                },
+            ) => {
+                l_if_pos == r_if_pos
+                    && l_cond == r_cond
+                    && l_then_arm == r_then_arm
+                    && l_else_pos == r_else_pos
+                    && l_else_arm == r_else_arm
+            }
+            (
+                Self::LoadStmt {
+                    load_pos: l_load_pos,
+                    module: l_module,
+                    from: l_from,
+                    to: l_to,
+                    rparen_pos: l_rparen_pos,
+                },
+                Self::LoadStmt {
+                    load_pos: r_load_pos,
+                    module: r_module,
+                    from: r_from,
+                    to: r_to,
+                    rparen_pos: r_rparen_pos,
+                },
+            ) => {
+                l_load_pos == r_load_pos
+                    && l_module == r_module
+                    && l_from == r_from
+                    && l_to == r_to
+                    && l_rparen_pos == r_rparen_pos
+            }
+            (
+                Self::ReturnStmt {
+                    return_pos: l_return_pos,
+                    result: l_result,
+                },
+                Self::ReturnStmt {
+                    return_pos: r_return_pos,
+                    result: r_result,
+                },
+            ) => l_return_pos == r_return_pos && l_result == r_result,
+            _ => false,
+        }
+    }
 }
 
 impl<'a> Display for StmtData<'a> {
@@ -189,8 +322,13 @@ pub struct Expr<'a> {
     pub data: ExprData<'a>,
 }
 
-#[derive(Debug)]
+impl<'a> PartialEq for Expr<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
 
+#[derive(Debug)]
 pub enum ExprData<'a> {
     BinaryExpr {
         x: &'a Expr<'a>,
@@ -282,6 +420,145 @@ pub enum ExprData<'a> {
         op: Token,
         x: Option<&'a Expr<'a>>, // may be nil if Op==STAR),
     },
+}
+
+impl<'a> PartialEq for ExprData<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::BinaryExpr {
+                    x: l_x,
+                    op: l_op,
+                    y: l_y,
+                    ..
+                },
+                Self::BinaryExpr {
+                    x: r_x,
+                    op: r_op,
+                    y: r_y,
+                    ..
+                },
+            ) => l_x == r_x && l_op == r_op && l_y == r_y,
+            (
+                Self::CallExpr {
+                    func: l_func,
+                    args: l_args,
+                    ..
+                },
+                Self::CallExpr {
+                    func: r_func,
+                    args: r_args,
+                    ..
+                },
+            ) => l_func == r_func && l_args == r_args,
+            (
+                Self::Comprehension {
+                    curly: l_curly,
+                    body: l_body,
+                    clauses: l_clauses,
+                    ..
+                },
+                Self::Comprehension {
+                    curly: r_curly,
+                    body: r_body,
+                    clauses: r_clauses,
+                    ..
+                },
+            ) => l_curly == r_curly && l_body == r_body && l_clauses == r_clauses,
+            (
+                Self::CondExpr {
+                    cond: l_cond,
+                    then_arm: l_then_arm,
+                    else_arm: l_else_arm,
+                    ..
+                },
+                Self::CondExpr {
+                    cond: r_cond,
+                    then_arm: r_then_arm,
+                    else_arm: r_else_arm,
+                    ..
+                },
+            ) => l_cond == r_cond && l_then_arm == r_then_arm && l_else_arm == r_else_arm,
+            (
+                Self::DictEntry {
+                    key: l_key,
+                    value: l_value,
+                    ..
+                },
+                Self::DictEntry {
+                    key: r_key,
+                    value: r_value,
+                    ..
+                },
+            ) => l_key == r_key && l_value == r_value,
+            (Self::DictExpr { list: l_list, .. }, Self::DictExpr { list: r_list, .. }) => {
+                l_list == r_list
+            }
+            (
+                Self::DotExpr {
+                    x: l_x,
+                    name: l_name,
+                    ..
+                },
+                Self::DotExpr {
+                    x: r_x,
+                    name: r_name,
+                    ..
+                },
+            ) => l_x == r_x && l_name.name == r_name.name,
+            (Self::Ident(l0), Self::Ident(r0)) => l0.name == r0.name,
+            (Self::IndexExpr { x: l_x, y: l_y, .. }, Self::IndexExpr { x: r_x, y: r_y, .. }) => {
+                l_x == r_x && l_y == r_y
+            }
+            (
+                Self::LambdaExpr {
+                    params: l_params,
+                    body: l_body,
+                    ..
+                },
+                Self::LambdaExpr {
+                    params: r_params,
+                    body: r_body,
+                    ..
+                },
+            ) => l_params == r_params && l_body == r_body,
+            (Self::ListExpr { list: l_list, .. }, Self::ListExpr { list: r_list, .. }) => {
+                l_list == r_list
+            }
+            (Self::Literal { token: l_token, .. }, Self::Literal { token: r_token, .. }) => {
+                l_token == r_token
+            }
+            (Self::ParenExpr { x: l_x, .. }, Self::ParenExpr { x: r_x, .. }) => l_x == r_x,
+            (
+                Self::SliceExpr {
+                    x: l_x,
+                    lo: l_lo,
+                    hi: l_hi,
+                    step: l_step,
+                    ..
+                },
+                Self::SliceExpr {
+                    x: r_x,
+                    lo: r_lo,
+                    hi: r_hi,
+                    step: r_step,
+                    ..
+                },
+            ) => l_x == r_x && l_lo == r_lo && l_hi == r_hi && l_step == r_step,
+            (Self::TupleExpr { list: l_list, .. }, Self::TupleExpr { list: r_list, .. }) => {
+                l_list == r_list
+            }
+            (
+                Self::UnaryExpr {
+                    op: l_op, x: l_x, ..
+                },
+                Self::UnaryExpr {
+                    op: r_op, x: r_x, ..
+                },
+            ) => l_op == r_op && l_x == r_x,
+            _ => false,
+        }
+    }
 }
 
 impl<'a> Display for ExprData<'a> {
@@ -399,7 +676,7 @@ impl Ident {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Clause<'a> {
     // A ForClause represents a for clause in a list comprehension: "for Vars in X".
     ForClause {
