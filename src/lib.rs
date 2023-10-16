@@ -4,6 +4,7 @@ mod quote;
 mod scan;
 mod syntax;
 mod token;
+mod walk;
 
 pub use parse::parse;
 pub use parse::MODE_PLAIN;
