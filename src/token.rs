@@ -1,4 +1,3 @@
-use phf::phf_map;
 use std::fmt::Display;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,41 +214,6 @@ impl Display for Token {
     }
 }
 
-// keywordToken records the special tokens for
-// strings that should not be treated as ordinary identifiers.
-pub const KEYWORD_TOKEN: phf::Map<&'static str, Token> = phf_map! {
-    "and" => Token::And,
-    "break" => Token::Break,
-    "continue" => Token::Continue,
-    "def" => Token::Def,
-    "elif" => Token::Elif,
-    "else" => Token::Else,
-    "for" => Token::For,
-    "if" => Token::If,
-    "in" => Token::In,
-    "lambda" => Token::Lambda,
-    "load" => Token::Load,
-    "not" => Token::Not,
-    "or" => Token::Or,
-    "pass" => Token::Pass,
-    "return" => Token::Return,
-    "while" => Token::While,
-    // reserved words,
-    "as" => Token::Illegal,
-    // "assert" => Token::Illegal, // heavily used by our tests
-    "async" => Token::Illegal,
-    "await" => Token::Illegal,
-    "class" => Token::Illegal,
-    "del" => Token::Illegal,
-    "except" => Token::Illegal,
-    "finally" => Token::Illegal,
-    "from" => Token::Illegal,
-    "global" => Token::Illegal,
-    "import" => Token::Illegal,
-    "is" => Token::Illegal,
-    "nonlocal" => Token::Illegal,
-    "raise" => Token::Illegal,
-    "try" => Token::Illegal,
-    "with" => Token::Illegal,
-    "yield" => Token::Illegal,
-};
+
+// get definition of KEYWORD_TOKEN
+include!(concat!(env!("OUT_DIR"), "/keyword_token_codegen.rs"));

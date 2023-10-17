@@ -1,20 +1,22 @@
 #[allow(dead_code)]
 use anyhow::anyhow;
-use phf::phf_map;
 
 // unesc maps single-letter chars following \ to their actual values.
-static UNESC: phf::Map<char, u8> = phf_map! {
-    'a' =>  '\x07' as u8,
-    'b' =>  '\x08' as u8,
-    'f' =>  '\x0C' as u8,
-    'n' =>  '\x0A' as u8,
-    'r' =>  '\x0D' as u8,
-    't' =>  '\x09' as u8,
-    'v' =>  '\x0B' as u8,
-    '\\' => '\\' as u8,
-    '\'' => '\'' as u8,
-    '"' =>  '"' as u8,
-};
+fn unesc(c: &char) -> u8 {
+    match c {
+        'a' => '\x07' as u8,
+        'b' => '\x08' as u8,
+        'f' => '\x0C' as u8,
+        'n' => '\x0A' as u8,
+        'r' => '\x0D' as u8,
+        't' => '\x09' as u8,
+        'v' => '\x0B' as u8,
+        '\\' => '\\' as u8,
+        '\'' => '\'' as u8,
+        '"' => '"' as u8,
+        _ => unreachable!(),
+    }
+}
 
 pub enum DecodedSequence {
     String(String),
@@ -112,7 +114,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                 // One-char escape.
                 // Escapes are allowed for both kinds of quotation
                 // mark, not just the kind in use.
-                buf.push(UNESC[&quoted.chars().nth(1).unwrap()]);
+                buf.push(unesc(&quoted.chars().nth(1).unwrap()));
                 quoted = &quoted[2..]
             }
 

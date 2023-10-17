@@ -7,10 +7,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-phf = { version = "0.11", features = ["macros"] }
 num-bigint = "0.4"
+phf = { version = "0.11.1", default-features = false }
 unicode_categories = "0.1"
 bumpalo = "3.14"
 
 [dev-dependencies]
 float-cmp = "0.9"
+
+[build-dependencies]
+phf = { version = "0.11.1", default-features = false }
+phf_codegen = "0.11.1"
