@@ -24,7 +24,7 @@ pub enum Node<'a> {
 }
 
 impl<'a> NodeIterator<'a> {
-    fn new(root: Node<'a>) -> Self {
+    pub fn new(root: Node<'a>) -> Self {
         NodeIterator {
             path: vec![(Node::Init(), 0)],
             cur: root,

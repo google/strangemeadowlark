@@ -1,5 +1,4 @@
 use crate::token::{IntValue, Token, KEYWORD_TOKEN};
-#[allow(dead_code)]
 use anyhow::anyhow;
 use std::{fmt::Display, path::Path, rc::Rc};
 

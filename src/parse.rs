@@ -37,9 +37,7 @@ pub fn parse<'b, P: AsRef<Path>>(
     mode: Mode,
 ) -> Result<&'b FileUnit<'b>> {
     let mut p = Parser::new(bump, path, src, mode)?;
-    let f: &'b FileUnit<'b> = p.parse_file(path.as_ref())?;
-    //p.assign_comments(f)?;
-    Ok(f)
+    p.parse_file(path.as_ref())
 }
 
 pub fn parse_expr<'b, P: AsRef<Path>>(
@@ -50,7 +48,6 @@ pub fn parse_expr<'b, P: AsRef<Path>>(
 ) -> Result<&'b Expr<'b>> {
     let mut p = Parser::new(bump, path, src, mode)?;
     p.parse_expr(false)
-    //p.assign_comments(f)?;
 }
 
 struct Parser<'a, 'b>
