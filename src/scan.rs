@@ -34,6 +34,7 @@ impl Position {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 // A Comment represents a single # comment.
 pub struct Comment {
     pub start: Position,
@@ -49,8 +50,8 @@ pub struct Scanner<'a> {
     dents: i8,                     // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
     line_start: bool,              // after NEWLINE; convert spaces to indentation tokens
     keep_comments: bool,           // accumulate comments in slice
-    line_comments: Vec<Comment>,   // list of full line comments (if keepComments)
-    suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
+    pub line_comments: Vec<Comment>,   // list of full line comments (if keepComments)
+    pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
     pub token_buf: TokenValue,
 }
 
@@ -242,8 +243,10 @@ impl<'a> Scanner<'a> {
 
                 // comment
                 if c == '#' {
+                    if self.keep_comments {
+                        self.mark_start_token();
+                    }
                     let comment_pos = self.pos.clone();
-
                     // Consume up to newline (included).
                     while c != '\0' && c != '\n' {
                         self.read();

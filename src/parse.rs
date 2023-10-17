@@ -72,6 +72,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(Parser { sc, tok, pos, bump })
     }
 
+    fn line_comments(&self) -> Vec<Comment> {
+        self.sc.line_comments.clone()
+    }
+
+    fn suffix_comments(&self) -> Vec<Comment> {
+        self.sc.suffix_comments.clone()
+    }
+
     // next_token advances the scanner and returns the position of the
     // previous token.
     fn next_token(&mut self) -> Result<Position> {
@@ -115,6 +123,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let f = self.bump.alloc(FileUnit {
             path,
             stmts: self.bump.alloc_slice_copy(&stmts.into_boxed_slice()),
+            line_comments: self.line_comments(),
+            suffix_comments: self.suffix_comments(),
         });
         return Ok(f);
     }
@@ -1390,88 +1400,10 @@ fn terminates_expr_list(tok: &Token) -> bool {
     }
 }
 
-/*
-
-// Comment assignment.
-// We build two lists of all subnodes, preorder and postorder.
-// The preorder list is ordered by start location, with outer nodes first.
-// The postorder list is ordered by end location, with outer nodes last.
-// We use the preorder list to assign each whole-line comment to the syntax
-// immediately following it, and we use the postorder list to assign each
-// end-of-line comment to the syntax immediately preceding it.
-
-// flattenAST returns the list of AST nodes, both in prefix order and in postfix
-// order.
-func flattenAST(root Node) (pre, post []Node) {
-    stack := []Node{}
-    Walk(root, func(n Node) bool {
-        if n != nil {
-            pre = append(pre, n)
-            stack = append(stack, n)
-        } else {
-            post = append(post, stack[len(stack)-1])
-            stack = stack[:len(stack)-1]
-        }
-        return true
-    })
-    return pre, post
-}
-
-// assignComments attaches comments to nearby syntax.
-fn  assignComments(n Node) {
-    // Leave early if there are no comments
-    if len(self.in.lineComments)+len(self.in.suffixComments) == 0 {
-        return
-    }
-
-    pre, post := flattenAST(n)
-
-    // Assign line comments to syntax immediately following.
-    line := self.in.lineComments
-    for _, x := range pre {
-        start, _ := x.Span()
-
-        switch x.(type) {
-        case *File:
-            continue
-        }
-
-        for len(line) > 0 && !start.isBefore(line[0].Start) {
-            x.AllocComments()
-            x.Comments().Before = append(x.Comments().Before, line[0])
-            line = line[1:]
-        }
-    }
-
-    // Remaining line comments go at end of file.
-    if len(line) > 0 {
-        n.AllocComments()
-        n.Comments().After = append(n.Comments().After, line...)
-    }
-
-    // Assign suffix comments to syntax immediately before.
-    suffix := self.in.suffixComments
-    for i := len(post) - 1; i >= 0; i-- {
-        x := post[i]
-
-        // Do not assign suffix comments to file
-        switch x.(type) {
-        case *File:
-            continue
-        }
-
-        _, end := x.Span()
-        if len(suffix) > 0 && end.isBefore(suffix[len(suffix)-1].Start) {
-            x.AllocComments()
-            x.Comments().Suffix = append(x.Comments().Suffix, suffix[len(suffix)-1])
-            suffix = suffix[:len(suffix)-1]
-        }
-    }
-}
- */
-
 #[cfg(test)]
 mod test {
+
+    use std::rc::Rc;
 
     use super::*;
     struct TestCase {
@@ -1568,10 +1500,10 @@ mod test {
             TestCase{
                 input:r#"{"a": 1, "b": 2}"#,
                 want: r#"(DictExpr List=((DictEntry Key="a" Value=1),(DictEntry Key="b" Value=2),))"#},
-                //TestCase{ input:"{x: y for (x, y) in z}",
-                //want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=(ParenExpr X=(TupleExpr List=(x y))) X=z)))"},
-            //TestCase{ input:"{x: y for a in b if c}",
-                //want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=a X=b) (IfClause Cond=c)))"},
+            TestCase{ input:"{x: y for (x, y) in z}",
+                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=(ParenExpr X=(TupleExpr List=(x,y,))) X=z),))"},
+            TestCase{ input:"{x: y for a in b if c}",
+                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=a X=b),(IfClause Cond=c),))"},
                 TestCase{ input:"-1 + +2",
                 want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=+ Y=(UnaryExpr Op=+ X=2))"},
                 TestCase{ input:r#""foo" + "bar""#,
@@ -1702,55 +1634,81 @@ else:
               TestCase{
                 input: "def f(a, b=c, d): pass",
                 want: "(DefStmt Name=f Params=(a,(BinaryExpr X=b Op== Y=c),d,) Body=((BranchStmt Token=pass),))",
-              }
+              }, // TODO: fix this
+              TestCase{
+                input: r#"def f():
+    def g():
+        pass
+    pass
+def h():
+    pass
+"#,
+                want: "(DefStmt Name=f Params=() Body=((DefStmt Name=g Params=() Body=((BranchStmt Token=pass),)),(BranchStmt Token=pass),))",
+              },
+              TestCase{
+                input:"f();g()",
+                want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
+              },
+              TestCase{
+                input:"f();",
+                want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
+              },
+              TestCase{
+                input:"f();g()\n",
+                want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
+              },
+              TestCase{
+                input:"f();\n",
+                want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
+              },
         ];
         for test_case in test_cases {
             match super::parse(&bump, &"foo.star", test_case.input, MODE_PLAIN) {
-                Ok(file_unit) if file_unit.stmts.len() == 1 => {
+                Ok(file_unit) if file_unit.stmts.len() >= 1 => {
                     let s = format!("{}", file_unit.stmts[0].data);
                     assert_eq!(s, test_case.want)
                 }
-                Ok(file_unit) => assert!(false, "not one stmt: {:?}", file_unit),
+                Ok(_) => assert!(false, "empty?"),
                 Err(msg) => assert!(false, "{}", msg),
             }
         }
     }
-    /*
-            TestCase{
-      input: "def f(a, b=c, d): pass",
-                want: "DefStmt Name=f Params=(a (BinaryExpr X=b Op== Y=c) d) Body=((BranchStmt Token=pass)))",
-    } // TODO(adonovan): fix this
-            TestCase{
-      input: "def f():
-        def g():
-            pass
-        pass
-    def h():
-        pass",
-                want: "DefStmt Name=f Body=((DefStmt Name=g Body=((BranchStmt Token=pass))) (BranchStmt Token=pass)))",
+
+    #[test]
+    fn test_retain_comments() -> Result<()> {
+        let bump = super::Bump::new();
+        let input = "# Hello world
+foo() #Suffix
+# Goodbye world";
+        let res = super::parse(&bump, &"foo.star", input, RETAIN_COMMENTS)?;
+        assert_eq!(
+            res.line_comments,
+            vec![Comment {
+                start: Position {
+                    path: Rc::new("foo.star".to_string()),
+                    line: 1,
+                    col: 1
+                },
+                text: "# Hello world".to_string()
+            }, Comment {
+                start: Position {
+                    path: Rc::new("foo.star".to_string()),
+                    line: 3,
+                    col: 1
+                },
+                text: "# Goodbye world".to_string()
+            }]
+        );
+        assert_eq!(
+            res.suffix_comments,
+            vec![Comment {
+                start: Position {
+                    path: Rc::new("foo.star".to_string()),
+                    line: 2,
+                    col: 7
+                },
+                text: "#Suffix".to_string()
+            }]);
+        Ok(())
     }
-            {"f();g()",
-                want: "ExprStmt X=(CallExpr Fn=f))",
-    }
-            {"f();",
-                want: "ExprStmt X=(CallExpr Fn=f))",
-    }
-            {"f();g()\n",
-                want: "ExprStmt X=(CallExpr Fn=f))",
-    }
-            {"f();\n",
-                want: "ExprStmt X=(CallExpr Fn=f))",
-    }
-        } {
-            f, err := syntax.Parse("foo.star", test.input, 0)
-            if err != nil {
-                t.Errorf("parse `%s` failed: %v", test.input, stripPos(err))
-                continue
-            }
-            if got := treeString(f.Stmts[0]); test.want != got {
-                t.Errorf("parse `%s` = %s, want %s", test.input, got, test.want)
-            }
-        }
-    }
-     */
 }

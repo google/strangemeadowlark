@@ -315,6 +315,8 @@ mod test {
         let file_unit = FileUnit {
             path: Path::new("path"),
             stmts: &[&foobar_stmt],
+            line_comments: vec![],
+            suffix_comments: vec![],
         };
         let test_cases = vec![TestCase {
             input: "foobar(x, y=3)",

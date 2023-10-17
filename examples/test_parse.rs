@@ -1,8 +1,7 @@
-
 use anyhow::{anyhow, Result};
 use bumpalo::Bump;
-use strangemeadowlark::MODE_PLAIN;
 use std::{env, fs::read_to_string};
+use strangemeadowlark::MODE_PLAIN;
 
 // E.g. cargo run --example test_parse /google/src/head/depot/google3/third_party/mangle/BUILD
 fn main() -> Result<()> {

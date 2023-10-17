@@ -16,6 +16,8 @@ trait NodeData {
 pub struct FileUnit<'a> {
     pub path: &'a Path,
     pub stmts: &'a [&'a Stmt<'a>],
+    pub line_comments: Vec<Comment>, // list of full line comments (if keepComments)
+    pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
 }
 
 impl<'a> NodeData for FileUnit<'a> {
@@ -574,8 +576,18 @@ impl<'a> Display for ExprData<'a> {
                 }
                 write!(f, "))")
             }
-            ExprData::Comprehension { body, clauses, .. } => {
-                write!(f, "(Comprehension Body={} Clauses=(", body.data)?;
+            ExprData::Comprehension {
+                curly,
+                body,
+                clauses,
+                ..
+            } => {
+                write!(
+                    f,
+                    "(Comprehension {}Body={} Clauses=(",
+                    if *curly { "Curly " } else { "" },
+                    body.data
+                )?;
                 for clause in clauses.iter() {
                     write!(f, "{},", clause)?;
                 }
