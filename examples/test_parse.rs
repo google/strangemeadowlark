@@ -17,7 +17,7 @@ use bumpalo::Bump;
 use std::{env, fs::read_to_string};
 use strangemeadowlark::MODE_PLAIN;
 
-// E.g. cargo run --example test_parse /google/src/head/depot/google3/third_party/mangle/BUILD
+// E.g. cargo run --example test_parse third_party/mangle/BUILD
 fn main() -> Result<()> {
     if env::args().len() != 2 {
         return Err(anyhow!("need exactly one arg"));
