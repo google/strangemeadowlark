@@ -148,7 +148,8 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 1 + then_arm.len() + else_arm.len(),
             ),
             StmtData::ReturnStmt { result, .. } => (Node::ExprRef(result.unwrap()), 1),
-            _ => unreachable!(),
+            StmtData::LoadStmt { module, ..} => (Node::ExprRef(module), 1),
+            _ => unreachable!("{:?}", r),
         },
         Node::ExprRef(r) => match r.data {
             ExprData::BinaryExpr { x, y, .. } => (Node::ExprRef(if index == 0 { x } else { y }), 2),

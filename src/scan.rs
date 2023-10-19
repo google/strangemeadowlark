@@ -674,7 +674,6 @@ impl<'a> Scanner<'a> {
         // as it assumes self.rest is unchanged since startToken.
         // Instead, buffer the token here.
         let len = self.token.len() - self.rest.len();
-
         // Copy the prefix, e.g. r' or " (see mark_start_token).
         let mut raw: String = self.token[..len].to_string();
         if !triple {
@@ -702,9 +701,9 @@ impl<'a> Scanner<'a> {
         } else {
             // triple-quoted string literal
             self.read();
-            raw.push('\'');
+            raw.push(quote);
             self.read();
-            raw.push('\'');
+            raw.push(quote);
 
             let mut quote_count = 0;
             loop {
@@ -713,7 +712,8 @@ impl<'a> Scanner<'a> {
                 }
                 let mut c = self.read();
                 raw.push(c);
-                if c == '\'' {
+
+                if c == quote {
                     quote_count = quote_count + 1;
                     if quote_count == 3 {
                         break;
