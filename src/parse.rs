@@ -59,7 +59,7 @@ pub fn parse_expr<'b, P: AsRef<Path>>(
     path: &'b P,
     src: &'b str,
     mode: Mode,
-) -> Result<&'b Expr<'b>> {
+) -> Result<ExprRef<'b>> {
     let mut p = Parser::new(bump, path, src, mode)?;
     p.parse_expr(false)
 }
@@ -99,7 +99,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.pos = old_pos;
         // enable to see the token stream
         if DEBUG {
-            //	log.Printf("next_token: %-20s%+v\n", p.tok, p.tokval.pos)
+            println!("next_token: {} {}", self.tok.kind, self.pos);
         }
         Ok(self.pos.clone())
     }
@@ -121,7 +121,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     where
         'b: 'a,
     {
-        let mut stmts: Vec<&'b Stmt<'b>> = vec![];
+        let mut stmts: Vec<StmtRef<'b>> = vec![];
         while self.tok.kind != Token::Eof {
             if self.tok.kind == Token::Newline {
                 self.next_token()?;
@@ -138,7 +138,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(f)
     }
 
-    fn parse_stmt(&mut self, stmts: &mut Vec<&'b Stmt<'b>>) -> Result<()> {
+    fn parse_stmt(&mut self, stmts: &mut Vec<StmtRef<'b>>) -> Result<()> {
         match self.tok.kind {
             Token::Def => stmts.push(self.parse_def_stmt()?),
             Token::If => stmts.push(self.parse_if_stmt()?),
@@ -149,7 +149,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(())
     }
 
-    fn parse_def_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_def_stmt(&mut self) -> Result<StmtRef<'b>> {
         self.next_token()?; // consume DEF
         let def_pos = self.pos.clone();
         let id = self.parse_ident()?;
@@ -177,7 +177,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(stmt)
     }
 
-    fn parse_if_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_if_stmt(&mut self) -> Result<StmtRef<'b>> {
         self.next_token()?;
         let if_pos = self.pos.clone(); // consume IF
         let cond = self.parse_test()?;
@@ -291,7 +291,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(if_stmt)
     }
 
-    fn parse_for_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_for_stmt(&mut self) -> Result<StmtRef<'b>> {
         let for_pos = self.next_token()?; // consume FOR
         let vars = self.parse_for_loop_vars()?;
         self.consume(Token::In)?;
@@ -316,7 +316,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     // Equivalent to 'exprlist' production in Python grammar.
     //
     // loop_variables = primary_with_suffix (COMMA primary_with_suffix)* COMMA?
-    fn parse_for_loop_vars(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_for_loop_vars(&mut self) -> Result<ExprRef<'b>> {
         // Avoid parseExpr because it would consume the IN token
         // following x in "for x in y: ...".
         let v = self.parse_primary_with_suffix()?;
@@ -347,7 +347,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(&*for_loop_vars)
     }
 
-    fn parse_while_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_while_stmt(&mut self) -> Result<StmtRef<'b>> {
         let while_pos = self.next_token()?; // consume WHILE
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
@@ -367,7 +367,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // stmt = LOAD '(' STRING {',' (IDENT '=')? STRING} [','] ')'
-    fn parse_load_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_load_stmt(&mut self) -> Result<StmtRef<'b>> {
         let load_pos = self.next_token()?; // consume LOAD
         self.consume(Token::LParen)?;
 
@@ -475,7 +475,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
     // In REPL mode, it does not consume the NEWLINE.
-    fn parse_simple_stmt(&mut self, stmts: &mut Vec<&'b Stmt<'b>>, consume_nl: bool) -> Result<()> {
+    fn parse_simple_stmt(&mut self, stmts: &mut Vec<StmtRef<'b>>, consume_nl: bool) -> Result<()> {
         loop {
             stmts.push(self.parse_small_stmt()?);
             if self.tok.kind != Token::Semi {
@@ -500,7 +500,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //	| LOAD ...
     //	| expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') expr   // assign
     //	| expr
-    fn parse_small_stmt(&mut self) -> Result<&'b Stmt<'b>> {
+    fn parse_small_stmt(&mut self) -> Result<StmtRef<'b>> {
         match self.tok.kind {
             Token::Return => {
                 let pos = self.next_token()?; // consume RETURN
@@ -589,7 +589,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // parse_test parses a 'test', a single-component expression.
-    fn parse_test(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_test(&mut self) -> Result<ExprRef<'b>> {
         if self.tok.kind == Token::Lambda {
             return self.parse_lambda(true);
         }
@@ -657,7 +657,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //	*Unary{Op: STAR}                                *
     //	*Unary{Op: STAR, X: *Ident}                     *args
     //	*Unary{Op: STARSTAR, X: *Ident}                 **kwargs
-    fn parse_params(&mut self) -> Result<&'b [&'b Expr<'b>]> {
+    fn parse_params(&mut self) -> Result<&'b [ExprRef<'b>]> {
         //fn  parseParams() []Expr {
         let mut params = vec![];
         while self.tok.kind != Token::RParen
@@ -729,7 +729,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //
     // In many cases we must use parse_test to avoid ambiguity such as
     // f(x, y) vs. f((x, y)).
-    fn parse_expr(&mut self, in_parens: bool) -> Result<&'b Expr<'b>> {
+    fn parse_expr(&mut self, in_parens: bool) -> Result<ExprRef<'b>> {
         let x = self.parse_test()?;
         if self.tok.kind != Token::Comma {
             return Ok(x);
@@ -760,7 +760,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //	| '{' ...                    // dict literal or comprehension
     //	| '(' ...                    // tuple or parenthesized expression
     //	| ('-'|'+'|'~') primary_with_suffix
-    fn parse_primary(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_primary(&mut self) -> Result<ExprRef<'b>> {
         match self.tok.kind {
             Token::Ident { .. } => {
                 let ident = self.parse_ident()?;
@@ -863,7 +863,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //	| '[' expr ']'
     //	| '[' expr expr_list ']'
     //	| '[' expr (FOR loop_variables IN expr)+ ']'
-    fn parse_list(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_list(&mut self) -> Result<ExprRef<'b>> {
         let lbrack = self.next_token()?;
         if self.tok.kind == Token::RBrack {
             // empty List
@@ -915,7 +915,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //
     //	| '{' dict_entry_list '}'
     //	| '{' dict_entry FOR loop_variables IN expr '}'
-    fn parse_dict(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_dict(&mut self) -> Result<ExprRef<'b>> {
         let lbrace = self.next_token()?;
         if self.tok.kind == Token::RBrace {
             // empty dict
@@ -967,7 +967,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // dict_entry = test ':' test
-    fn parse_dict_entry(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_dict_entry(&mut self) -> Result<ExprRef<'b>> {
         let k = self.parse_test()?;
         let colon = self.consume(Token::Colon)?;
         let v = self.parse_test()?;
@@ -990,7 +990,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     // expr_list = (',' expr)* ','?
     fn parse_exprs(
         &mut self,
-        exprs: &mut Vec<&'b Expr<'b>>,
+        exprs: &mut Vec<ExprRef<'b>>,
         allow_trailing_comma: bool,
     ) -> Result<()> {
         while self.tok.kind == Token::Comma {
@@ -1007,7 +1007,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // call_suffix = '(' arg_list? ')'
-    fn parse_call_suffix(&mut self, func: &'b Expr<'b>) -> Result<&'b Expr<'b>> {
+    fn parse_call_suffix(&mut self, func: ExprRef<'b>) -> Result<ExprRef<'b>> {
         let lparen = self.consume(Token::LParen)?;
         let mut args: &[&Expr] = &[];
         let rparen = if self.tok.kind == Token::RParen {
@@ -1033,7 +1033,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // parseLambda parses a lambda expression.
     // The allowCond flag allows the body to be an 'a if b else c' conditional.
-    fn parse_lambda(&mut self, allow_cond: bool) -> Result<&'b Expr<'b>> {
+    fn parse_lambda(&mut self, allow_cond: bool) -> Result<ExprRef<'b>> {
         let lambda_pos = self.next_token()?;
         let mut params: &[&Expr] = &[];
         if self.tok.kind != Token::Colon {
@@ -1070,9 +1070,9 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn parse_comprehension_suffix(
         &mut self,
         lbrace: Position,
-        body: &'b Expr<'b>,
+        body: ExprRef<'b>,
         end_brace: Token,
-    ) -> Result<&'b Expr<'b>> {
+    ) -> Result<ExprRef<'b>> {
         let mut clauses = vec![]; // []Node
         while self.tok.kind != end_brace {
             if self.tok.kind == Token::For {
@@ -1127,7 +1127,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // parse_testNoCond parses a a single-component expression without
     // consuming a trailing 'if expr else expr'.
-    fn parse_test_no_cond(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_test_no_cond(&mut self) -> Result<ExprRef<'b>> {
         if self.tok.kind == Token::Lambda {
             self.parse_lambda(false)
         } else {
@@ -1135,7 +1135,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
-    fn parse_test_prec(&mut self, prec: usize) -> Result<&'b Expr<'b>> {
+    fn parse_test_prec(&mut self, prec: usize) -> Result<ExprRef<'b>> {
         if prec >= SUP_PREC {
             return self.parse_primary_with_suffix();
         }
@@ -1164,7 +1164,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     // parseArgs parses a list of actual parameter values (arguments).
     // It mirrors the structure of parseParams.
     // arg_list = ((arg COMMA)* arg COMMA?)?
-    fn parse_args(&mut self) -> Result<&'b [&'b Expr<'b>]> {
+    fn parse_args(&mut self) -> Result<&'b [ExprRef<'b>]> {
         let mut args = vec![];
         while self.tok.kind != Token::RParen && self.tok.kind != Token::Eof {
             if !args.is_empty() {
@@ -1231,7 +1231,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // suite is typically what follows a COLON (e.g. after DEF or FOR).
     // suite = simple_stmt | NEWLINE INDENT stmt+ OUTDENT
-    fn parse_suite(&mut self) -> Result<&'b [&'b Stmt<'b>]> {
+    fn parse_suite(&mut self) -> Result<&'b [StmtRef<'b>]> {
         let mut stmts = vec![]; // []Stmt
         if self.tok.kind == Token::Newline {
             self.next_token()?; // consume NEWLINE
@@ -1249,7 +1249,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // expr = test (OP test)*
     // Uses precedence climbing; see http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm#climbing.
-    fn parse_binop_expr(&mut self, prec: usize) -> Result<&'b Expr<'b>> {
+    fn parse_binop_expr(&mut self, prec: usize) -> Result<ExprRef<'b>> {
         let mut x = self.parse_test_prec(prec + 1)?;
         let mut first = true;
         loop {
@@ -1305,7 +1305,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     //	| primary '.' IDENT
     //	| primary slice_suffix
     //	| primary call_suffix
-    fn parse_primary_with_suffix(&mut self) -> Result<&'b Expr<'b>> {
+    fn parse_primary_with_suffix(&mut self) -> Result<ExprRef<'b>> {
         let mut x = self.parse_primary()?;
         loop {
             match self.tok.kind {
@@ -1335,7 +1335,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // slice_suffix = '[' expr? ':' expr?  ':' expr? ']'
-    fn parse_slice_suffix(&mut self, x: &'b Expr<'b>) -> Result<&'b Expr<'b>> {
+    fn parse_slice_suffix(&mut self, x: ExprRef<'b>) -> Result<ExprRef<'b>> {
         let lbrack = self.next_token()?;
         let mut lo: Option<&Expr> = None;
         if self.tok.kind != Token::Colon {
@@ -1408,7 +1408,7 @@ mod test {
     use super::*;
     struct TestCase {
         input: &'static str,
-        want: &'static str, //&'b Expr<'b>,
+        want: &'static str, //ExprRef<'b>,
     }
 
     #[test]

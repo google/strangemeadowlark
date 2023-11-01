@@ -26,10 +26,12 @@ trait NodeData {
     fn add_comment(&mut self, comment: Comment);
 }
 
+pub type StmtRef<'a> = &'a Stmt<'a>;
+
 #[derive(Debug, PartialEq)]
 pub struct FileUnit<'a> {
     pub path: &'a Path,
-    pub stmts: &'a [&'a Stmt<'a>],
+    pub stmts: &'a [StmtRef<'a>],
     pub line_comments: Vec<Comment>, // list of full line comments (if keepComments)
     pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
 }
@@ -81,14 +83,16 @@ impl<'a> PartialEq for Stmt<'a> {
     }
 }
 
+pub type ExprRef<'a> = &'a Expr<'a>;
+
 #[derive(Debug)]
 pub enum StmtData<'a> {
     // op is one of EQ | {PLUS,MINUS,STAR,PERCENT}_EQ
     AssignStmt {
         op_pos: Position,
         op: Token,
-        lhs: &'a Expr<'a>,
-        rhs: &'a Expr<'a>,
+        lhs: ExprRef<'a>,
+        rhs: ExprRef<'a>,
     },
     BranchStmt {
         token: Token, // = BREAK | CONTINUE | PASS
@@ -98,41 +102,41 @@ pub enum StmtData<'a> {
         def_pos: Position,
         name: &'a Ident,
         lparen: Position,
-        params: &'a [&'a Expr<'a>],
+        params: &'a [ExprRef<'a>],
         rparen: Position,
-        body: &'a [&'a Stmt<'a>],
+        body: &'a [StmtRef<'a>],
     },
     ExprStmt {
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
     },
     ForStmt {
         for_pos: Position,
-        vars: &'a Expr<'a>, // name, or tuple of names
-        x: &'a Expr<'a>,
-        body: &'a [&'a Stmt<'a>],
+        vars: ExprRef<'a>, // name, or tuple of names
+        x: ExprRef<'a>,
+        body: &'a [StmtRef<'a>],
     },
     WhileStmt {
         while_pos: Position,
-        cond: &'a Expr<'a>,
-        body: &'a [&'a Stmt<'a>],
+        cond: ExprRef<'a>,
+        body: &'a [StmtRef<'a>],
     },
     IfStmt {
         if_pos: Position, // IF or ELIF
-        cond: &'a Expr<'a>,
-        then_arm: &'a [&'a Stmt<'a>],
+        cond: ExprRef<'a>,
+        then_arm: &'a [StmtRef<'a>],
         else_pos: Option<Position>,   // ELSE or ELIF
-        else_arm: &'a [&'a Stmt<'a>], // optional
+        else_arm: &'a [StmtRef<'a>], // optional
     },
     LoadStmt {
         load_pos: Position,
-        module: &'a Expr<'a>,  // Literal string
+        module: ExprRef<'a>,  // Literal string
         from: &'a [&'a Ident], // name defined in loading module
         to: &'a [&'a Ident],   // name in loaded module
         rparen_pos: Position,
     },
     ReturnStmt {
         return_pos: Position,
-        result: Option<&'a Expr<'a>>,
+        result: Option<ExprRef<'a>>,
     },
 }
 
@@ -347,15 +351,15 @@ impl<'a> PartialEq for Expr<'a> {
 #[derive(Debug)]
 pub enum ExprData<'a> {
     BinaryExpr {
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
         op_pos: Position,
         op: Token,
-        y: &'a Expr<'a>,
+        y: ExprRef<'a>,
     },
     CallExpr {
-        func: &'a Expr<'a>,
+        func: ExprRef<'a>,
         lparen: Position,
-        args: &'a [&'a Expr<'a>], // arg = expr | ident=expr | *expr | **expr
+        args: &'a [ExprRef<'a>], // arg = expr | ident=expr | *expr | **expr
         rparen: Position,
     },
     /// A Comprehension represents a list or dict comprehension:
@@ -363,49 +367,49 @@ pub enum ExprData<'a> {
     Comprehension {
         curly: bool, // {x:y for ...} or {x for ...}, not [x for ...]
         lbrack_pos: Position,
-        body: &'a Expr<'a>,
+        body: ExprRef<'a>,
         clauses: &'a [&'a Clause<'a>],
         rbrack_pos: Position,
     },
     CondExpr {
         if_pos: Position,
-        cond: &'a Expr<'a>,
-        then_arm: &'a Expr<'a>,
+        cond: ExprRef<'a>,
+        then_arm: ExprRef<'a>,
         else_pos: Position,
-        else_arm: &'a Expr<'a>,
+        else_arm: ExprRef<'a>,
     },
     DictEntry {
-        key: &'a Expr<'a>,
+        key: ExprRef<'a>,
         colon: Position,
-        value: &'a Expr<'a>,
+        value: ExprRef<'a>,
     },
     DictExpr {
         lbrace: Position,
-        list: &'a [&'a Expr<'a>], // all *DictEntrys
+        list: &'a [ExprRef<'a>], // all *DictEntrys
         rbrace: Position,
     },
     DotExpr {
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
         dot: Position,
         name_pos: Position,
         name: &'a Ident,
     },
     Ident(&'a Ident),
     IndexExpr {
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
         lbrack: Position,
-        y: &'a Expr<'a>,
+        y: ExprRef<'a>,
         rbrack: Position,
     },
     LambdaExpr {
         lambda_pos: Position,
         // param = ident | ident=expr | * | *ident | **ident
-        params: &'a [&'a Expr<'a>],
-        body: &'a Expr<'a>,
+        params: &'a [ExprRef<'a>],
+        body: ExprRef<'a>,
     },
     ListExpr {
         lbrack: Position,
-        list: &'a [&'a Expr<'a>],
+        list: &'a [ExprRef<'a>],
         rbrack: Position,
     },
     Literal {
@@ -415,26 +419,26 @@ pub enum ExprData<'a> {
     },
     ParenExpr {
         lparen: Position,
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
         rparen: Position,
     },
     SliceExpr {
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
         lbrack: Position,
-        lo: Option<&'a Expr<'a>>,
-        hi: Option<&'a Expr<'a>>,
-        step: Option<&'a Expr<'a>>,
+        lo: Option<ExprRef<'a>>,
+        hi: Option<ExprRef<'a>>,
+        step: Option<ExprRef<'a>>,
         rbrack: Position,
     },
     TupleExpr {
         lparen: Option<Position>, // optional (e.g. in x, y = 0, 1), but required if List is empty
-        list: &'a [&'a Expr<'a>],
+        list: &'a [ExprRef<'a>],
         rparen: Option<Position>,
     },
     UnaryExpr {
         op_pos: Position,
         op: Token,
-        x: Option<&'a Expr<'a>>, // may be nil if Op==STAR),
+        x: Option<ExprRef<'a>>, // may be nil if Op==STAR),
     },
 }
 
@@ -707,15 +711,15 @@ pub enum Clause<'a> {
     // A ForClause represents a for clause in a list comprehension: "for Vars in X".
     ForClause {
         for_pos: Position,
-        vars: &'a Expr<'a>, // name, or tuple of names
+        vars: ExprRef<'a>, // name, or tuple of names
         in_pos: Position,
-        x: &'a Expr<'a>,
+        x: ExprRef<'a>,
     },
 
     // An IfClause represents an if clause in a list comprehension: if Cond.
     IfClause {
         if_pos: Position,
-        cond: &'a Expr<'a>,
+        cond: ExprRef<'a>,
     },
 }
 
