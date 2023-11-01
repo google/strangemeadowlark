@@ -103,7 +103,7 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
     let (node, sup) = match node {
         Node::Init() => unreachable!(),
         Node::FileUnitRef(r) => {
-            let stmt = r.stmts.iter().nth(index).unwrap();
+            let stmt = r.stmts.get(index).unwrap();
             (Node::StmtRef(stmt), r.stmts.len())
         }
         Node::StmtRef(r) => match &r.data {
@@ -114,20 +114,18 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 if index < params.len() {
                     Node::ExprRef(params[index])
                 } else {
-                    Node::StmtRef(body.iter().nth(index - params.len()).unwrap())
+                    Node::StmtRef(body.get(index - params.len()).unwrap())
                 },
                 params.len() + 1,
             ),
 
             StmtData::ExprStmt { x } => (Node::ExprRef(x), 1),
-            StmtData::ForStmt { body, .. } => {
-                (Node::StmtRef(body.iter().nth(index).unwrap()), body.len())
-            }
+            StmtData::ForStmt { body, .. } => (Node::StmtRef(body.get(index).unwrap()), body.len()),
             StmtData::WhileStmt { cond, body, .. } => (
                 if index == 0 {
                     Node::ExprRef(cond)
                 } else {
-                    Node::StmtRef(body.iter().nth(index - 1).unwrap())
+                    Node::StmtRef(body.get(index - 1).unwrap())
                 },
                 body.len() + 1,
             ),
@@ -141,14 +139,14 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 if index == 0 {
                     Node::ExprRef(cond)
                 } else if index < then_arm.len() {
-                    Node::StmtRef(then_arm.iter().nth(index - 1).unwrap())
+                    Node::StmtRef(then_arm.get(index - 1).unwrap())
                 } else {
-                    Node::StmtRef(else_arm.iter().nth(index - then_arm.len() - 1).unwrap())
+                    Node::StmtRef(else_arm.get(index - then_arm.len() - 1).unwrap())
                 },
                 1 + then_arm.len() + else_arm.len(),
             ),
             StmtData::ReturnStmt { result, .. } => (Node::ExprRef(result.unwrap()), 1),
-            StmtData::LoadStmt { module, ..} => (Node::ExprRef(module), 1),
+            StmtData::LoadStmt { module, .. } => (Node::ExprRef(module), 1),
             _ => unreachable!("{:?}", r),
         },
         Node::ExprRef(r) => match r.data {
@@ -157,7 +155,7 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 Node::ExprRef(if index == 0 {
                     func
                 } else {
-                    args.iter().nth(index - 1).unwrap()
+                    args.get(index - 1).unwrap()
                 }),
                 1 + args.len(),
             ),
@@ -165,7 +163,7 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 if index == 0 {
                     Node::ExprRef(body)
                 } else {
-                    Node::ClauseRef(clauses.iter().nth(index - 1).unwrap())
+                    Node::ClauseRef(clauses.get(index - 1).unwrap())
                 },
                 1 + clauses.len(),
             ),
@@ -189,21 +187,21 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 (Node::ExprRef(if index == 0 { key } else { value }), 2)
             }
             ExprData::DictExpr { list, .. } => {
-                (Node::ExprRef(list.iter().nth(index).unwrap()), list.len())
+                (Node::ExprRef(list.get(index).unwrap()), list.len())
             }
 
             ExprData::DotExpr { x, .. } => (Node::ExprRef(x), 1),
             ExprData::IndexExpr { x, y, .. } => (Node::ExprRef(if index == 0 { x } else { y }), 2),
             ExprData::LambdaExpr { params, body, .. } => (
                 Node::ExprRef(if index < params.len() {
-                    params.iter().nth(index).unwrap()
+                    params.get(index).unwrap()
                 } else {
                     body
                 }),
                 params.len() + 1,
             ),
             ExprData::ListExpr { list, .. } => {
-                (Node::ExprRef(list.iter().nth(index).unwrap()), list.len())
+                (Node::ExprRef(list.get(index).unwrap()), list.len())
             }
 
             ExprData::ParenExpr { x, .. } => (Node::ExprRef(x), 1),
@@ -222,7 +220,7 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                     + if step.is_some() { 1 } else { 0 },
             ),
             ExprData::TupleExpr { list, .. } => {
-                (Node::ExprRef(list.iter().nth(index).unwrap()), list.len())
+                (Node::ExprRef(list.get(index).unwrap()), list.len())
             }
             ExprData::UnaryExpr { x, .. } => (Node::ExprRef(x.unwrap()), 1),
 
@@ -251,7 +249,7 @@ mod test {
         scan::Position,
         syntax::{Ident, Span},
         token::{IntValue, Token},
-        MODE_PLAIN,
+        Mode,
     };
 
     use super::*;
@@ -348,7 +346,7 @@ mod test {
         }];
         for test_case in test_cases {
             let bump = Bump::new();
-            let res = parse(&bump, &"path", test_case.input, MODE_PLAIN)?;
+            let res = parse(&bump, &"path", test_case.input, Mode::Plain)?;
             let mut it = NodeIterator::new(Node::FileUnitRef(&res));
 
             let mut want_it = test_case.want.iter();

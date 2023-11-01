@@ -19,8 +19,7 @@ mod syntax;
 mod token;
 mod walk;
 
-pub use parse::{parse, parse_expr};
-pub use parse::{MODE_PLAIN, RETAIN_COMMENTS};
-pub use walk::{Node, NodeIterator};
+pub use parse::{parse, parse_expr, Mode};
 pub use syntax::*;
 pub use token::*;
+pub use walk::{Node, NodeIterator};

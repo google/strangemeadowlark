@@ -12,22 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[allow(dead_code)]
 use anyhow::anyhow;
 
 // unesc maps single-letter chars following \ to their actual values.
 fn unesc(c: &char) -> u8 {
     match c {
-        'a' => '\x07' as u8,
-        'b' => '\x08' as u8,
-        'f' => '\x0C' as u8,
-        'n' => '\x0A' as u8,
-        'r' => '\x0D' as u8,
-        't' => '\x09' as u8,
-        'v' => '\x0B' as u8,
-        '\\' => '\\' as u8,
-        '\'' => '\'' as u8,
-        '"' => '"' as u8,
+        'a' => b'\x07',
+        'b' => b'\x08',
+        'f' => b'\x0C',
+        'n' => b'\x0A',
+        'r' => b'\x0D',
+        't' => b'\x09',
+        'v' => b'\x0B',
+        '\\' => b'\\',
+        '\'' => b'\'',
+        '"' => b'"',
         _ => unreachable!(),
     }
 }
@@ -45,12 +44,12 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
     let mut is_byte = false;
     // Check for raw prefix: means don't interpret the inner \.
     let mut raw = false;
-    if quoted.starts_with("r") {
+    if quoted.starts_with('r') {
         raw = true;
         quoted = &quoted[1..]
     }
     // Check for bytes prefix.
-    if quoted.starts_with("b") {
+    if quoted.starts_with('b') {
         is_byte = true;
         quoted = &quoted[1..]
     }
@@ -59,13 +58,13 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
         return Err(anyhow!("string literal too short"));
     }
 
-    let first = quoted.chars().nth(0).unwrap();
+    let first = quoted.chars().next().unwrap();
     if first != '"' && first != '\'' || first != quoted.chars().last().unwrap() {
         return Err(anyhow!("string literal has invalid quotes"));
     }
 
     // Check for triple quoted string.
-    let quote = quoted.chars().nth(0).unwrap();
+    let quote = quoted.chars().next().unwrap();
     if quoted.len() >= 6
         && quoted.chars().nth(1).unwrap() == quote
         && quoted.chars().nth(2).unwrap() == quote
@@ -92,7 +91,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
         // Remove prefix before escape sequence.
         match quoted.chars().position(|c| unquote_chars.contains(c)) {
             Some(i) => {
-                (&quoted[..i]).chars().for_each(|c| buf.push(c as u8));
+                (quoted[..i]).chars().for_each(|c| buf.push(c as u8));
                 quoted = &quoted[i..];
             }
             _ => {
@@ -102,8 +101,8 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
         }
 
         // Process carriage return.
-        if quoted.chars().nth(0).unwrap() == '\r' {
-            buf.push('\n' as u8);
+        if quoted.starts_with('\r') {
+            buf.push(b'\n');
             quoted = if quoted.len() > 1 && quoted.chars().nth(1).unwrap() == '\n' {
                 &quoted[2..]
             } else {
@@ -137,13 +136,13 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                 let mut n = quoted.chars().nth(1).unwrap().to_digit(8).unwrap();
                 quoted = &quoted[2..];
                 for i in 1..3 {
-                    if quoted.len() == 0
+                    if quoted.is_empty()
                         || quoted.chars().nth(i).unwrap() < '0'
-                        || '7' < quoted.chars().nth(0).unwrap()
+                        || '7' < quoted.chars().next().unwrap()
                     {
                         break;
                     }
-                    n = n * 8 + quoted.chars().nth(0).unwrap().to_digit(8).unwrap();
+                    n = n * 8 + quoted.chars().next().unwrap().to_digit(8).unwrap();
                     quoted = &quoted[1..];
                 }
                 if !is_byte && n > 127 {
@@ -174,7 +173,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                         }
                         let mut tmp: [u8; 4] = [0; 4];
                         let encoded = char::encode_utf8(decoded_ch.unwrap(), &mut tmp);
-                        encoded.as_bytes().into_iter().for_each(|b| buf.push(*b));
+                        encoded.as_bytes().iter().for_each(|b| buf.push(*b));
                         quoted = &quoted[4..]
                     }
                     _ => return Err(anyhow!("could not parse unicode codepoint {}", quoted)),
@@ -193,7 +192,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                 match u32::from_str_radix(&quoted[2..sz], 16) {
                     Ok(n) => {
                         // As in Rust, surrogates are disallowed.
-                        if 0xd800u32 <= n && n < 0xe000u32 {
+                        if (0xd800u32..0xe000u32).contains(&n) {
                             return Err(anyhow!("invalid Unicode code point U{:04x}", n));
                         }
                         if n > 0x10FFFFu32 {
@@ -209,7 +208,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                         }
                         let mut tmp: [u8; 8] = [0; 8];
                         let encoded = char::encode_utf8(decoded_ch.unwrap(), &mut tmp); // from_u32(n).unwrap());
-                        encoded.as_bytes().into_iter().for_each(|b| buf.push(*b));
+                        encoded.as_bytes().iter().for_each(|b| buf.push(*b));
                         quoted = &quoted[sz..]
                     }
                     _ => return Err(anyhow!("failed to parse unicode code point: {}", quoted)),
@@ -230,7 +229,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
     }
 
     let buf_utf8 = String::from_utf8(buf)?;
-    return Ok(DecodedSequence::String(buf_utf8));
+    Ok(DecodedSequence::String(buf_utf8))
 }
 
 // Quote returns a Starlark literal that denotes s.
@@ -246,5 +245,5 @@ pub fn quote(s: &str) -> String {
         c.escape_default().for_each(|c| buf.push(c));
     }
     buf.push('"');
-    return buf;
+    buf
 }

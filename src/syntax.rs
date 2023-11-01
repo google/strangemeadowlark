@@ -691,7 +691,7 @@ pub struct Ident {
 }
 
 impl Ident {
-    pub fn as_expr<'a>(&'a self) -> Expr<'a> {
+    pub fn as_expr(&self) -> Expr {
         Expr {
             span: Span {
                 start: self.name_pos.clone(),

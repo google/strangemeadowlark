@@ -25,7 +25,7 @@ pub struct Position {
     pub col: u32,  // 1-based column (rune) number; 0 if column unknown
 }
 
-impl<'a> Display for Position {
+impl Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -56,14 +56,14 @@ pub struct Comment {
 
 pub struct Scanner<'a> {
     rest: &'a str,
-    token: &'a str,                //  slice with current token
-    pub pos: Position,             // current input position
-    depth: usize,                  // nesting of [ ] { } ( )
-    indentstk: Vec<usize>,         // stack of indentation levels
-    dents: i8,                     // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
-    line_start: bool,              // after NEWLINE; convert spaces to indentation tokens
-    keep_comments: bool,           // accumulate comments in slice
-    pub line_comments: Vec<Comment>,   // list of full line comments (if keepComments)
+    token: &'a str,                    //  slice with current token
+    pub pos: Position,                 // current input position
+    depth: usize,                      // nesting of [ ] { } ( )
+    indentstk: Vec<usize>,             // stack of indentation levels
+    dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
+    line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
+    keep_comments: bool, // accumulate comments in slice
+    pub line_comments: Vec<Comment>, // list of full line comments (if keepComments)
     pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
     pub token_buf: TokenValue,
 }
@@ -75,8 +75,8 @@ pub struct TokenValue {
     pub raw: String,   // raw text of token
 }
 
-const TRIPLE_QUOTE: &'static str = "'''";
-const TRIPLE_DOUBLE_QUOTE: &'static str = "\"\"\"";
+const TRIPLE_QUOTE: &str = "'''";
+const TRIPLE_DOUBLE_QUOTE: &str = "\"\"\"";
 
 impl<'a> Scanner<'a> {
     // The scanner operates on &str, advancing one char at a time.
@@ -116,7 +116,7 @@ impl<'a> Scanner<'a> {
     // peek returns the next char in the input without consuming it.
     // Newlines in Unix, DOS, or Mac format are treated as one rune, '\n'.
     fn peek(&self) -> char {
-        if self.rest.len() == 0 {
+        if self.rest.is_empty() {
             return '\0';
         }
         let c = self.rest.chars().next().unwrap();
@@ -128,24 +128,24 @@ impl<'a> Scanner<'a> {
     }
 
     fn read(&mut self) -> char {
-        if self.rest.len() == 0 {
+        if self.rest.is_empty() {
             return '\0';
         }
-        let mut c = self.rest.chars().nth(0).unwrap();
+        let mut c = self.rest.chars().next().unwrap();
         self.rest = &self.rest[c.len_utf8()..];
 
         if c == '\r' {
-            if self.rest.len() > 0 && self.rest.chars().nth(0).unwrap() == '\n' {
+            if !self.rest.is_empty() && self.rest.starts_with('\n') {
                 self.rest = &self.rest[1..];
             }
             c = '\n';
         }
         if c == '\n' {
-            self.pos.line = self.pos.line + 1;
+            self.pos.line += 1;
             self.pos.col = 1;
             return c;
         }
-        self.pos.col = self.pos.col + 1;
+        self.pos.col += 1;
         c
     }
 
@@ -189,7 +189,7 @@ impl<'a> Scanner<'a> {
                     loop {
                         c = self.peek();
                         if c == ' ' {
-                            col = col + 1;
+                            col += 1;
                             self.read();
                         } else if c == '\t' {
                             let tab = 8;
@@ -209,22 +209,27 @@ impl<'a> Scanner<'a> {
                     // inside an expression.  This is not the common case.
                     if !blank && self.depth == 0 {
                         let cur = self.indentstk.last().copied().unwrap();
-                        if col > cur {
-                            // indent
-                            self.dents = self.dents + 1;
-                            self.indentstk.push(col)
-                        } else if col < cur {
-                            // outdent(s)
-                            while self.indentstk.len() > 0 && col < *self.indentstk.last().unwrap()
-                            {
-                                self.dents = self.dents - 1;
-                                self.indentstk.pop();
+                        match col.cmp(&cur) {
+                            std::cmp::Ordering::Less => {
+                                // outdent(s)
+                                while !self.indentstk.is_empty()
+                                    && col < *self.indentstk.last().unwrap()
+                                {
+                                    self.dents -= 1;
+                                    self.indentstk.pop();
+                                }
+                                if col != *self.indentstk.last().unwrap() {
+                                    return Err(anyhow!(
+                                        "{:?} unindent does not match any outer indentation level",
+                                        self.pos
+                                    ));
+                                }
                             }
-                            if col != *self.indentstk.last().unwrap() {
-                                return Err(anyhow!(
-                                    "{:?} unindent does not match any outer indentation level",
-                                    self.pos
-                                ));
+                            std::cmp::Ordering::Equal => {}
+                            std::cmp::Ordering::Greater => {
+                                // indent
+                                self.dents += 1;
+                                self.indentstk.push(col)
                             }
                         }
                     }
@@ -233,12 +238,12 @@ impl<'a> Scanner<'a> {
                 // Return saved indentation tokens.
                 if self.dents != 0 {
                     if self.dents < 0 {
-                        self.dents = self.dents + 1;
+                        self.dents += 1;
                         self.token_buf.kind = Token::Outdent;
                         self.token_buf.pos = self.pos.clone();
                         return Ok(());
                     } else {
-                        self.dents = self.dents - 1;
+                        self.dents -= 1;
                         self.token_buf.kind = Token::Indent;
                         self.token_buf.pos = self.pos.clone();
                         return Ok(());
@@ -404,7 +409,7 @@ impl<'a> Scanner<'a> {
                 // brackets
                 match c {
                     '[' | '(' | '{' => {
-                        self.depth = self.depth + 1;
+                        self.depth += 1;
                         self.read();
                         self.mark_end_token();
 
@@ -428,7 +433,7 @@ impl<'a> Scanner<'a> {
                         if self.depth == 0 {
                             return Err(anyhow!("{} unexpected '{}'", self.pos, c));
                         } else {
-                            self.depth = self.depth - 1
+                            self.depth -= 1
                         }
                         self.read();
                         self.mark_end_token();
@@ -679,7 +684,7 @@ impl<'a> Scanner<'a> {
         if !triple {
             // single-quoted string literal
             loop {
-                if self.rest.len() == 0 {
+                if self.rest.is_empty() {
                     return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                 }
                 let mut c = self.read();
@@ -691,7 +696,7 @@ impl<'a> Scanner<'a> {
                     return Err(anyhow!("{:?} unexpected newline in string", self.pos));
                 }
                 if c == '\\' {
-                    if self.rest.len() == 0 {
+                    if self.rest.is_empty() {
                         return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                     }
                     c = self.read();
@@ -707,14 +712,14 @@ impl<'a> Scanner<'a> {
 
             let mut quote_count = 0;
             loop {
-                if self.rest.len() == 0 {
+                if self.rest.is_empty() {
                     return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                 }
                 let mut c = self.read();
                 raw.push(c);
 
                 if c == quote {
-                    quote_count = quote_count + 1;
+                    quote_count += 1;
                     if quote_count == 3 {
                         break;
                     }
@@ -722,7 +727,7 @@ impl<'a> Scanner<'a> {
                     quote_count = 0
                 }
                 if c == '\\' {
-                    if self.rest.len() == 0 {
+                    if self.rest.is_empty() {
                         return Err(anyhow!("{:?} unexpected eof in string", self.pos));
                     }
                     c = self.read();
@@ -740,10 +745,7 @@ impl<'a> Scanner<'a> {
             }
             Err(e) => return Err(anyhow!("error unquoting: {}", e)),
         }
-
-        //self.token_buf.decoded = Some(DecodedValue::String(s.to_string()));
-        //self.token_buf.kind = if is_byte {  } else { Token::String{decoded: s} };
-        return Ok(());
+        Ok(())
     }
 
     fn scan_number(&mut self, ch: char) -> anyhow::Result<()> {
@@ -780,10 +782,10 @@ impl<'a> Scanner<'a> {
                 // hex
                 self.read();
                 c = self.peek();
-                if !c.is_digit(16) {
+                if !c.is_ascii_hexdigit() {
                     return Err(anyhow!("{} invalid hex literal", start));
                 }
-                while c.is_digit(16) {
+                while c.is_ascii_hexdigit() {
                     self.read();
                     c = self.peek();
                 }
@@ -884,67 +886,66 @@ impl<'a> Scanner<'a> {
             let float_value = self.token.parse::<f64>()?;
             self.token_buf.kind = Token::Float { float_value };
             return Ok(());
-        } else {
-            let s = self.token;
-            if s.len() > 2 {
-                match &s[..2] {
-                    "0o" | "0O" => {
-                        let int_value = i64::from_str_radix(&s[2..], 8)?;
-                        self.token_buf.kind = Token::Int {
-                            decoded: IntValue::Int(int_value),
-                        };
-                        return Ok(());
-                    }
-                    "0b" | "0B" => {
-                        let int_value = i64::from_str_radix(&s[2..], 2)?;
-                        self.token_buf.kind = Token::Int {
-                            decoded: IntValue::Int(int_value),
-                        };
-                        return Ok(());
-                    }
-                    "0x" | "0X" => match i64::from_str_radix(&s[2..], 16) {
-                        Ok(int_value) => {
-                            self.token_buf.kind = Token::Int {
-                                decoded: IntValue::Int(int_value),
-                            };
-                            return Ok(());
-                        }
-                        _ => {
-                            let bigint_value =
-                                num_bigint::BigInt::parse_bytes(&s[2..].as_bytes(), 16)
-                                    .ok_or(anyhow!("{} could not parse hex big int", start))?;
-                            self.token_buf.kind = Token::Int {
-                                decoded: IntValue::BigInt(bigint_value),
-                            };
-                            return Ok(());
-                        }
-                    },
-
-                    _ => { /* decimal handled below */ }
-                }
-            }
-            match s.parse::<i64>() {
-                Ok(int_value) => {
+        }
+        let s = self.token;
+        if s.len() > 2 {
+            match &s[..2] {
+                "0o" | "0O" => {
+                    let int_value = i64::from_str_radix(&s[2..], 8)?;
                     self.token_buf.kind = Token::Int {
                         decoded: IntValue::Int(int_value),
                     };
+                    return Ok(());
                 }
-                _ => {
-                    let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes(), 10)
-                        .ok_or(anyhow!("{} could not parse big int", start))?;
+                "0b" | "0B" => {
+                    let int_value = i64::from_str_radix(&s[2..], 2)?;
                     self.token_buf.kind = Token::Int {
-                        decoded: IntValue::BigInt(bigint_value),
+                        decoded: IntValue::Int(int_value),
                     };
+                    return Ok(());
                 }
+                "0x" | "0X" => match i64::from_str_radix(&s[2..], 16) {
+                    Ok(int_value) => {
+                        self.token_buf.kind = Token::Int {
+                            decoded: IntValue::Int(int_value),
+                        };
+                        return Ok(());
+                    }
+                    _ => {
+                        let bigint_value =
+                            num_bigint::BigInt::parse_bytes(s[2..].as_bytes(), 16)
+                                .ok_or(anyhow!("{} could not parse hex big int", start))?;
+                        self.token_buf.kind = Token::Int {
+                            decoded: IntValue::BigInt(bigint_value),
+                        };
+                        return Ok(());
+                    }
+                },
+
+                _ => { /* decimal handled below */ }
             }
-            return Ok(());
         }
+        match s.parse::<i64>() {
+            Ok(int_value) => {
+                self.token_buf.kind = Token::Int {
+                    decoded: IntValue::Int(int_value),
+                };
+            }
+            _ => {
+                let bigint_value = num_bigint::BigInt::parse_bytes(s.as_bytes(), 10)
+                    .ok_or(anyhow!("{} could not parse big int", start))?;
+                self.token_buf.kind = Token::Int {
+                    decoded: IntValue::BigInt(bigint_value),
+                };
+            }
+        }
+        Ok(())
     }
 }
 
 fn is_ident_start(c: char) -> bool {
     use unicode_categories::UnicodeCategories;
-    'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || c == '_' || c.is_letter()
+    c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' || c.is_letter()
 }
 
 fn is_ident(c: char) -> bool {

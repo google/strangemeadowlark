@@ -30,12 +30,12 @@ use bumpalo::Bump;
 // Enable this flag to print the token stream and log.Fatal on the first error.
 const DEBUG: bool = false;
 
-// A Mode value is a set of flags (or 0) that controls optional parser functionality.
-type Mode = u16;
-
-pub const MODE_PLAIN: Mode = 0;
-// not implemented
-pub const RETAIN_COMMENTS: Mode = 1; // retain comments in AST; see Node.Comments
+// Mode controls optional parser functionality.
+#[derive(PartialEq, Eq)]
+pub enum Mode {
+    Plain,
+    RetainComments,
+}
 
 // Parse parses the input data and returns the corresponding parse tree.
 //
@@ -76,7 +76,7 @@ where
 
 impl<'a, 'b> Parser<'a, 'b> {
     fn new<P: AsRef<Path>>(bump: &'b Bump, path: &'b P, src: &'b str, mode: Mode) -> Result<Self> {
-        let mut sc = Scanner::new(path, src, mode & RETAIN_COMMENTS != 0)?;
+        let mut sc = Scanner::new(path, src, mode == Mode::RetainComments)?;
         // Read first lookahead token.
         let tok = sc.next_token()?;
         let pos = sc.pos.clone();
@@ -101,7 +101,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         if DEBUG {
             //	log.Printf("next_token: %-20s%+v\n", p.tok, p.tokval.pos)
         }
-        return Ok(self.pos.clone());
+        Ok(self.pos.clone())
     }
 
     fn consume(&mut self, expected: Token) -> Result<Position> {
@@ -127,9 +127,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.next_token()?;
                 continue;
             }
-            {
-                let _ = self.parse_stmt(&mut stmts)?;
-            }
+            self.parse_stmt(&mut stmts)?;
         }
         let f = self.bump.alloc(FileUnit {
             path,
@@ -137,7 +135,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             line_comments: self.line_comments(),
             suffix_comments: self.suffix_comments(),
         });
-        return Ok(f);
+        Ok(f)
     }
 
     fn parse_stmt(&mut self, stmts: &mut Vec<&'b Stmt<'b>>) -> Result<()> {
@@ -148,7 +146,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Token::While => stmts.push(self.parse_while_stmt()?),
             _ => return self.parse_simple_stmt(stmts, true),
         }
-        return Ok(());
+        Ok(())
     }
 
     fn parse_def_stmt(&mut self) -> Result<&'b Stmt<'b>> {
@@ -168,7 +166,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 end: def_pos.clone(),
             },
             data: DefStmt {
-                def_pos: def_pos.clone(),
+                def_pos,
                 name: id,
                 lparen,
                 params,
@@ -176,7 +174,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 body,
             },
         });
-        return Ok(stmt);
+        Ok(stmt)
     }
 
     fn parse_if_stmt(&mut self) -> Result<&'b Stmt<'b>> {
@@ -191,8 +189,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 end: if_pos.clone(),
             },
             data: IfStmt {
-                if_pos: if_pos.clone(),
-                cond: &cond,
+                if_pos,
+                cond,
                 then_arm: body,
                 else_pos: None,
                 else_arm: &[],
@@ -213,7 +211,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 },
                 data: IfStmt {
                     if_pos: elif_pos.clone(),
-                    cond: &cond,
+                    cond,
                     then_arm: body,
                     else_pos: None,
                     else_arm: &[],
@@ -229,8 +227,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         if !elifs.is_empty() {
             let mut tmp = elifs.pop().unwrap();
-            match else_arm {
-                Some((last_else_pos, last_else_arm)) => match tmp {
+            if let Some((last_else_pos, last_else_arm)) = else_arm {
+                match tmp {
                     Stmt {
                         data:
                             IfStmt {
@@ -242,8 +240,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         *else_arm = last_else_arm;
                     }
                     _ => unreachable!(),
-                },
-                _ => {}
+                }
             }
             while !elifs.is_empty() {
                 let next_last_if = elifs.pop().unwrap();
@@ -275,22 +272,19 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 _ => unreachable!(),
             }
-        } else {
-            match else_arm {
-                Some((last_else_pos, last_else_arm)) => match if_stmt {
-                    Stmt {
-                        data:
-                            IfStmt {
-                                else_pos, else_arm, ..
-                            },
-                        ..
-                    } => {
-                        *else_pos = last_else_pos;
-                        *else_arm = last_else_arm;
-                    }
-                    _ => unreachable!(),
-                },
-                _ => {}
+        } else if let Some((last_else_pos, last_else_arm)) = else_arm {
+            match if_stmt {
+                Stmt {
+                    data:
+                        IfStmt {
+                            else_pos, else_arm, ..
+                        },
+                    ..
+                } => {
+                    *else_pos = last_else_pos;
+                    *else_arm = last_else_arm;
+                }
+                _ => unreachable!(),
             }
         }
 
@@ -350,7 +344,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 rparen: None,
             },
         });
-        return Ok(&*for_loop_vars);
+        Ok(&*for_loop_vars)
     }
 
     fn parse_while_stmt(&mut self) -> Result<&'b Stmt<'b>> {
@@ -455,7 +449,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         let rparen = self.consume(Token::RParen)?;
 
-        if to.len() == 0 {
+        if to.is_empty() {
             return Err(anyhow!(
                 "{} load statement must import at least 1 symbol",
                 self.pos
@@ -476,7 +470,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 rparen_pos: rparen,
             },
         });
-        return Ok(load_stmt);
+        Ok(load_stmt)
     }
 
     // simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
@@ -587,11 +581,11 @@ impl<'a, 'b> Parser<'a, 'b> {
         let expr_stmt = self.bump.alloc(Stmt {
             span: Span {
                 start: pos.clone(),
-                end: pos.clone(),
+                end: pos,
             },
             data: StmtData::ExprStmt { x },
         });
-        return Ok(expr_stmt);
+        Ok(expr_stmt)
     }
 
     // parse_test parses a 'test', a single-component expression.
@@ -623,7 +617,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     if_pos,
                     cond,
                     then_arm: x,
-                    else_pos: else_pos,
+                    else_pos,
                     else_arm: else_,
                 },
             }));
@@ -756,7 +750,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 rparen: None,
             },
         });
-        return Ok(tuple_expr);
+        Ok(tuple_expr)
     }
 
     // primary = IDENT
@@ -777,7 +771,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     },
                     data: ExprData::Ident(ident),
                 });
-                return Ok(ident_expr);
+                Ok(ident_expr)
             }
 
             Token::Int { .. }
@@ -791,7 +785,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let literal = self.bump.alloc(Expr {
                     span: Span {
                         start: pos.clone(),
-                        end: pos.clone(),
+                        end: pos,
                     },
                     data: ExprData::Literal {
                         token,
@@ -799,11 +793,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                         raw,
                     },
                 });
-                return Ok(literal);
+                Ok(literal)
             }
-            Token::LBrack => return self.parse_list(),
+            Token::LBrack => self.parse_list(),
 
-            Token::LBrace => return self.parse_dict(),
+            Token::LBrace => self.parse_dict(),
 
             Token::LParen => {
                 let lparen = self.next_token()?;
@@ -836,7 +830,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         rparen,
                     },
                 });
-                return Ok(paren_expr);
+                Ok(paren_expr)
             }
             Token::Minus | Token::Plus | Token::Tilde => {
                 // unary
@@ -854,15 +848,13 @@ impl<'a, 'b> Parser<'a, 'b> {
                         x: Some(x),
                     },
                 });
-                return Ok(unary_expr);
+                Ok(unary_expr)
             }
-            _ => {
-                return Err(anyhow!(
-                    "{} got {}, want primary expression",
-                    self.pos,
-                    self.tok.kind
-                ))
-            }
+            _ => Err(anyhow!(
+                "{} got {}, want primary expression",
+                self.pos,
+                self.tok.kind
+            )),
         }
     }
 
@@ -916,7 +908,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 rbrack,
             },
         });
-        return Ok(list_expr);
+        Ok(list_expr)
     }
 
     // dict = '{' '}'
@@ -971,7 +963,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 rbrace,
             },
         });
-        return Ok(dict_expr);
+        Ok(dict_expr)
     }
 
     // dict_entry = test ':' test
@@ -1011,7 +1003,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             exprs.push(self.parse_test()?);
         }
-        return Ok(());
+        Ok(())
     }
 
     // call_suffix = '(' arg_list? ')'
@@ -1234,7 +1226,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             args.push(x);
         }
         let args = self.bump.alloc_slice_copy(&args.into_boxed_slice());
-        return Ok(args);
+        Ok(args)
     }
 
     // suite is typically what follows a COLON (e.g. after DEF or FOR).
@@ -1252,7 +1244,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.parse_simple_stmt(&mut stmts, true)?;
         }
         let stmts = self.bump.alloc_slice_copy(&stmts.into_boxed_slice());
-        return Ok(&*stmts);
+        Ok(&*stmts)
     }
 
     // expr = test (OP test)*
@@ -1275,7 +1267,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let op_prec = self.tok.kind.precedence();
             if op_prec.is_none() || op_prec.unwrap() < prec {
                 let x = self.bump.alloc(x);
-                return Ok(&*x);
+                return Ok(*x);
             }
             // Comparisons are non-associative.
             if !first && op_prec == Token::Eq.precedence() {
@@ -1405,10 +1397,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
 fn terminates_expr_list(tok: &Token) -> bool {
     use Token::*;
-    match tok {
-        Eof | Newline | Eq | RBrace | RBrack | RParen | Semi => true,
-        _ => false,
-    }
+    matches!(tok, Eof | Newline | Eq | RBrace | RBrack | RParen | Semi)
 }
 
 #[cfg(test)]
@@ -1545,7 +1534,7 @@ mod test {
                 want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))"}, // github.com/google/skylark/issues/53
                 ];
         for test_case in test_cases {
-            match super::parse_expr(&bump, &"foo.star", test_case.input, MODE_PLAIN) {
+            match super::parse_expr(&bump, &"foo.star", test_case.input, Mode::Plain) {
                 Ok(expr) => {
                     let s = format!("{}", expr.data);
                     assert_eq!(s, test_case.want)
@@ -1674,7 +1663,7 @@ def h():
               },
         ];
         for test_case in test_cases {
-            match super::parse(&bump, &"foo.star", test_case.input, MODE_PLAIN) {
+            match super::parse(&bump, &"foo.star", test_case.input, Mode::Plain) {
                 Ok(file_unit) if file_unit.stmts.len() >= 1 => {
                     let s = format!("{}", file_unit.stmts[0].data);
                     assert_eq!(s, test_case.want)
@@ -1691,24 +1680,27 @@ def h():
         let input = "# Hello world
 foo() #Suffix
 # Goodbye world";
-        let res = super::parse(&bump, &"foo.star", input, RETAIN_COMMENTS)?;
+        let res = super::parse(&bump, &"foo.star", input, Mode::RetainComments)?;
         assert_eq!(
             res.line_comments,
-            vec![Comment {
-                start: Position {
-                    path: Rc::new("foo.star".to_string()),
-                    line: 1,
-                    col: 1
+            vec![
+                Comment {
+                    start: Position {
+                        path: Rc::new("foo.star".to_string()),
+                        line: 1,
+                        col: 1
+                    },
+                    text: "# Hello world".to_string()
                 },
-                text: "# Hello world".to_string()
-            }, Comment {
-                start: Position {
-                    path: Rc::new("foo.star".to_string()),
-                    line: 3,
-                    col: 1
-                },
-                text: "# Goodbye world".to_string()
-            }]
+                Comment {
+                    start: Position {
+                        path: Rc::new("foo.star".to_string()),
+                        line: 3,
+                        col: 1
+                    },
+                    text: "# Goodbye world".to_string()
+                }
+            ]
         );
         assert_eq!(
             res.suffix_comments,
@@ -1719,7 +1711,8 @@ foo() #Suffix
                     col: 7
                 },
                 text: "#Suffix".to_string()
-            }]);
+            }]
+        );
         Ok(())
     }
 }

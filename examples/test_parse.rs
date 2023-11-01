@@ -15,7 +15,7 @@
 use anyhow::{anyhow, Result};
 use bumpalo::Bump;
 use std::{env, fs::read_to_string};
-use strangemeadowlark::MODE_PLAIN;
+use strangemeadowlark::{parse, Mode};
 
 // E.g. cargo run --example test_parse third_party/mangle/BUILD
 fn main() -> Result<()> {
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let src = read_to_string(&path)?;
     let bump = Bump::new();
-    let res = strangemeadowlark::parse(&bump, &path, &src, MODE_PLAIN)?;
+    let res = parse(&bump, &path, &src, Mode::Plain)?;
     for stmt in res.stmts {
         println!("{}", stmt.data);
     }
