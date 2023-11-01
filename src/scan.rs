@@ -390,7 +390,7 @@ impl<'a> Scanner<'a> {
                         c = self.peek()
                     }
                     self.mark_end_token();
-                    match KEYWORD_TOKEN.get(&self.token_buf.raw) {
+                    match KEYWORD_TOKEN.get(self.token_buf.raw.as_str()) {
                         Some(k) => self.token_buf.kind = k.clone(),
                         _ => {
                             self.token_buf.kind = Token::Ident {

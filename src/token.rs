@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
+use std::{fmt::Display, collections::HashMap};
+use lazy_static::lazy_static;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntValue {
@@ -229,5 +230,40 @@ impl Display for Token {
 }
 
 
-// get definition of KEYWORD_TOKEN
-include!(concat!(env!("OUT_DIR"), "/keyword_token_codegen.rs"));
+lazy_static!{
+    pub static ref KEYWORD_TOKEN: HashMap<&'static str, Token> = [
+    ("in", Token::In),
+    ("async", Token::Illegal),
+    ("await", Token::Illegal),
+    ("else", Token::Else),
+    ("try", Token::Illegal),
+    ("raise", Token::Illegal),
+    ("import", Token::Illegal),
+    ("except", Token::Illegal),
+    ("nonlocal", Token::Illegal),
+    ("return", Token::Return),
+    ("lambda", Token::Lambda),
+    ("break", Token::Break),
+    ("load", Token::Load),
+    ("continue", Token::Continue),
+    ("if", Token::If),
+    ("with", Token::Illegal),
+    ("is", Token::Illegal),
+    ("global", Token::Illegal),
+    ("for", Token::For),
+    ("as", Token::Illegal),
+    ("or", Token::Or),
+    ("while", Token::While),
+    ("pass", Token::Pass),
+    ("from", Token::Illegal),
+    ("del", Token::Illegal),
+    ("class", Token::Illegal),
+    ("finally", Token::Illegal),
+    ("yield", Token::Illegal),
+    ("elif", Token::Elif),
+    ("not", Token::Not),
+    ("and", Token::And),
+    ("def", Token::Def),
+    ].into_iter().collect();
+
+}
