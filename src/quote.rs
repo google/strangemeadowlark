@@ -78,8 +78,8 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
     // Now quoted is the quoted data, but no quotes.
     // If we're in raw mode or there are no escapes or
     // carriage returns, we're done.
-    let unquote_chars = if raw { "\r" } else { "\\\r" };
-    if !quoted.chars().any(|x| unquote_chars.contains(x)) {
+    let unquote_chars: &[char] = if raw { &['\r'] } else { &['\\', '\r'] };
+    if !quoted.contains(unquote_chars) {
         return Ok(DecodedSequence::String(quoted.to_string()));
     }
 
@@ -89,7 +89,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
     let mut buf: Vec<u8> = vec![];
     loop {
         // Remove prefix before escape sequence.
-        match quoted.chars().position(|c| unquote_chars.contains(c)) {
+        match quoted.chars().position(|c| unquote_chars.contains(&c)) {
             Some(i) => {
                 (quoted[..i]).chars().for_each(|c| buf.push(c as u8));
                 quoted = &quoted[i..];

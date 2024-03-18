@@ -124,12 +124,12 @@ pub enum StmtData<'a> {
         if_pos: Position, // IF or ELIF
         cond: ExprRef<'a>,
         then_arm: &'a [StmtRef<'a>],
-        else_pos: Option<Position>,   // ELSE or ELIF
+        else_pos: Option<Position>,  // ELSE or ELIF
         else_arm: &'a [StmtRef<'a>], // optional
     },
     LoadStmt {
         load_pos: Position,
-        module: ExprRef<'a>,  // Literal string
+        module: ExprRef<'a>,   // Literal string
         from: &'a [&'a Ident], // name defined in loading module
         to: &'a [&'a Ident],   // name in loaded module
         rparen_pos: Position,
