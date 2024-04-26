@@ -242,8 +242,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     _ => unreachable!(),
                 }
             }
-            while !elifs.is_empty() {
-                let next_last_if = elifs.pop().unwrap();
+            while let Some(next_last_if) = elifs.pop() {
                 match next_last_if {
                     Stmt {
                         data:

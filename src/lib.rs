@@ -18,8 +18,10 @@ mod scan;
 mod syntax;
 mod token;
 mod walk;
+mod print;
 
 pub use parse::{parse, parse_expr, Mode};
 pub use syntax::*;
 pub use token::*;
 pub use walk::{Node, NodeIterator};
+pub use print::Printer;
