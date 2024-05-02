@@ -48,7 +48,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         Ok(())
     }
 
-    fn print_comments(&mut self, up_to: &Span) -> Result<()> {
+    fn print_line_comments(&mut self, up_to: &Span) -> Result<()> {
         for comment in &self.unit.line_comments {
             if comment.start.line <= self.last_comment_line {
                 continue;
@@ -56,9 +56,12 @@ impl<'ast, 'w> Printer<'ast, 'w> {
             if comment.start.line > up_to.start.line {
                 break;
             }
-            for _i in 1..(comment.start.line - self.current_line) {
+            for _ in 1..(comment.start.line - self.current_line) {
                 writeln!(self.writer)?;
                 self.current_line += 1;
+            }
+            for _ in 1..comment.start.col {
+                write!(self.writer, " ")?;
             }
             writeln!(self.writer, "{}", comment.text)?;
             self.last_comment_line = comment.start.line;
@@ -69,7 +72,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 
     pub fn print_file_unit(&mut self) -> Result<()> {
         for &stmt in self.unit.stmts {
-            self.print_comments(&stmt.span)?;
+            self.print_line_comments(&stmt.span)?;
             self.print_stmt(stmt)?;
             writeln!(self.writer)?;
         }
@@ -77,6 +80,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     }
 
     pub fn print_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        self.print_line_comments(&stmt.span)?;
         self.print_indent()?;
         match &stmt.data {
             crate::StmtData::AssignStmt {
@@ -345,6 +349,8 @@ x = 1
 y = 1
 for x in foo():
   pass
+
+  # Comment in a different place.
   continue
   break
 
