@@ -48,6 +48,16 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         Ok(())
     }
 
+    fn print_suffix_newline(&mut self, current: &Span) -> Result<()> {
+        for comment in &self.unit.suffix_comments {
+            if comment.start.line == current.start.line {
+                writeln!(self.writer, "{}", comment.text)?;
+                break
+            }
+        }
+        self.print_newline(current)
+    }
+
     fn print_line_comments(&mut self, up_to: &Span) -> Result<()> {
         for comment in &self.unit.line_comments {
             if comment.start.line <= self.last_comment_line {
@@ -348,7 +358,7 @@ x = 1
 #world
 y = 1
 for x in foo():
-  pass
+  pass # suffix comment
 
   # Comment in a different place.
   continue
