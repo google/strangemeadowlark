@@ -51,7 +51,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     fn print_suffix_newline(&mut self, current: &Span) -> Result<()> {
         for comment in &self.unit.suffix_comments {
             if comment.start.line == current.start.line {
-                writeln!(self.writer, "{}", comment.text)?;
+                write!(self.writer, " {}", comment.text)?;
                 break
             }
         }
@@ -66,13 +66,14 @@ impl<'ast, 'w> Printer<'ast, 'w> {
             if comment.start.line > up_to.start.line {
                 break;
             }
-            for _ in 1..(comment.start.line - self.current_line) {
+            for _ in 0..(comment.start.line - self.current_line) {
                 writeln!(self.writer)?;
                 self.current_line += 1;
             }
             for _ in 1..comment.start.col {
                 write!(self.writer, " ")?;
             }
+
             writeln!(self.writer, "{}", comment.text)?;
             self.last_comment_line = comment.start.line;
             self.current_line = comment.start.line + 1;
@@ -84,7 +85,6 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         for &stmt in self.unit.stmts {
             self.print_line_comments(&stmt.span)?;
             self.print_stmt(stmt)?;
-            writeln!(self.writer)?;
         }
         Ok(())
     }
@@ -94,29 +94,36 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         self.print_indent()?;
         match &stmt.data {
             crate::StmtData::AssignStmt {
-                op_pos: _,
                 op,
                 lhs,
                 rhs,
+                ..
             } => {
                 self.print_expr(lhs)?;
                 write!(self.writer, " {} ", op)?;
                 self.print_expr(rhs)?;
             }
             crate::StmtData::BranchStmt { token, .. } => {
-                writeln!(self.writer, "{}", token)?;
+                write!(self.writer, "{}", token)?;
             }
             crate::StmtData::DefStmt {
-                def_pos: _,
-                name: _,
-                lparen: _,
-                params: _,
-                rparen: _,
-                body: _,
-            } => todo!(),
+                name,                
+                params,
+                body,
+                ..
+            } => {
+                write!(self.writer, "def {}(", name.name)?;
+                self.print_comma_separated(params.iter())?;
+                write!(self.writer, "):")?;
+                self.print_newline(&stmt.span)?;
+                self.incr_indent();
+                for stmt in body.iter() {
+                    self.print_stmt(stmt)?;
+                }
+                self.decr_indent();
+            }
             crate::StmtData::ExprStmt { x } => {
                 self.print_expr(x)?;
-                self.print_newline(&x.span)?;
             }
             crate::StmtData::ForStmt { vars, x, body, .. } => {
                 write!(self.writer, "for ")?;
@@ -176,13 +183,10 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                     write!(self.writer, "else:")?;
                     self.incr_indent();
                     self.print_newline(&cond.span)?;
-                    let mut last_span = cond.span.clone();
                     for stmt in then_arm.iter() {
                         self.print_stmt(stmt)?;
-                        last_span = stmt.span.clone();
                     }
                     self.decr_indent();
-                    self.print_newline(&last_span)?;
                 }
             }
             crate::StmtData::LoadStmt {
@@ -202,6 +206,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
             }
             crate::StmtData::ReturnStmt { return_pos: _, result: _ } => todo!(),
         }
+        self.print_suffix_newline(&stmt.span)?;
         Ok(())
     }
 

@@ -81,7 +81,6 @@ const TRIPLE_DOUBLE_QUOTE: &str = "\"\"\"";
 impl<'a> Scanner<'a> {
     // The scanner operates on &str, advancing one char at a time.
     // path is only used in error messages.
-    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(
         path: &'a P,
         data: &'a str,
@@ -169,12 +168,12 @@ impl<'a> Scanner<'a> {
     // position where the token begins), token_buf.raw (the input string
     // corresponding to the token).  For string and int tokens, the decoded
     // field additionally contains the token's interpreted value.
-    #[allow(dead_code)]
     pub fn next_token(&mut self) -> anyhow::Result<TokenValue> {
         self.next_token_internal().map(|()| self.token_buf.clone())
     }
 
     pub fn next_token_internal(&mut self) -> anyhow::Result<()> {
+        #[allow(clippy::never_loop)]  // clippy is wrong here.
         loop {
             self.token_buf.kind = Token::Illegal;
             'start: loop {
