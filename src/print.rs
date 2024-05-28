@@ -197,7 +197,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 for (f, t) in from.iter().zip(to.iter()) {
                     write!(self.writer, ", ")?;
                     if f == t {
-                        write!(self.writer, "{}", f.name)?;
+                        write!(self.writer, "{:?}", f.name)?;
                     } else {
                         write!(self.writer, "{} = {:?}", f.name, t.name)?;
                     }
