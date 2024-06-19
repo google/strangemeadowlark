@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2024-06-19
+
+### 🚀 Features
+
+- Add missing print cases to pretty printer.
+
 ## [0.1.3] - 2024-05-28
 
 ### 🐛 Bug Fixes
 
 - Print load statements correctly
+
+### ⚙️ Miscellaneous Tasks
+
+- Release strangemeadowlark version 0.1.3
 
 ## [0.1.2] - 2024-05-22
 
