@@ -204,7 +204,16 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 }
                 write!(self.writer, ")")?;
             }
-            crate::StmtData::ReturnStmt { return_pos: _, result: _ } => todo!(),
+            crate::StmtData::ReturnStmt { return_pos: _, result } => {
+                write!(self.writer, "return")?;
+                match result {
+                    Some(res) => {
+                        write!(self.writer, " ")?;
+                        self.print_expr(res)?
+                    }
+                    _ => {}
+                }
+            }
         }
         self.print_suffix_newline(&stmt.span)?;
         Ok(())
@@ -279,7 +288,11 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 write!(self.writer, " else ")?;
                 self.print_expr(else_arm)?;
             }
-            crate::ExprData::DictEntry { key: _, colon: _, value: _ } => todo!(),
+            crate::ExprData::DictEntry { key, colon: _, value } => {
+                self.print_expr(key)?;
+                write!(self.writer, ": ")?;
+                self.print_expr(value)?;                
+            },
             crate::ExprData::DictExpr { list, .. } => {
                 write!(self.writer, "{{")?;
                 self.print_comma_separated(list.iter())?;
@@ -368,6 +381,7 @@ for x in foo():
   # Comment in a different place.
   continue
   break
+  return {'foo': 'bar'}
 
 ";
         let bump = Bump::new();
