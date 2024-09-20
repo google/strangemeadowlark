@@ -242,7 +242,7 @@ mod test {
 
     use anyhow::Result;
     use bumpalo::Bump;
-    use std::{path::Path, rc::Rc};
+    use std::path::Path;
 
     use crate::{
         parse,
@@ -260,34 +260,30 @@ mod test {
 
     #[test]
     fn test_walk() -> Result<()> {
-        let fake_pos = Position {
-            path: Rc::new("path".to_string()),
-            line: 1,
-            col: 1,
-        };
+        let fake_pos = Position { line: 1, col: 1 };
         let span = Span {
-            start: fake_pos.clone(),
-            end: fake_pos.clone(),
+            start: fake_pos,
+            end: fake_pos,
         };
-        let foobar_ident = Ident::new(fake_pos.clone(), "foobar".to_string());
+        let foobar_ident = Ident::new(fake_pos, "foobar".to_string());
         let foobar = Expr {
-            span: span.clone(),
+            span: span,
             data: ExprData::Ident(&foobar_ident),
         };
-        let x_ident = Ident::new(fake_pos.clone(), "x".to_string());
+        let x_ident = Ident::new(fake_pos, "x".to_string());
         let x = Expr {
-            span: span.clone(),
+            span: span,
             data: ExprData::Ident(&x_ident),
         };
-        let y_ident = Ident::new(fake_pos.clone(), "y".to_string());
+        let y_ident = Ident::new(fake_pos, "y".to_string());
         let y = Expr {
-            span: span.clone(),
+            span: span,
             data: ExprData::Ident(&y_ident),
         };
         let three = Expr {
-            span: span.clone(),
+            span: span,
             data: ExprData::Literal {
-                token_pos: fake_pos.clone(),
+                token_pos: fake_pos,
                 token: Token::Int {
                     decoded: IntValue::Int(3),
                 },
@@ -295,25 +291,25 @@ mod test {
             },
         };
         let y_expr = Expr {
-            span: span.clone(),
+            span: span,
             data: ExprData::BinaryExpr {
                 x: &y,
-                op_pos: fake_pos.clone(),
+                op_pos: fake_pos,
                 op: Token::Eq,
                 y: &three,
             },
         };
         let foobar_expr = Expr {
-            span: span.clone(),
+            span,
             data: ExprData::CallExpr {
                 func: &foobar,
-                lparen: fake_pos.clone(),
+                lparen: fake_pos,
                 args: &[&x, &y_expr],
-                rparen: fake_pos.clone(),
+                rparen: fake_pos,
             },
         };
         let foobar_stmt = Stmt {
-            span: span.clone(),
+            span: span,
             data: StmtData::ExprStmt { x: &foobar_expr },
         };
         let file_unit = FileUnit {

@@ -14,13 +14,12 @@
 
 use crate::token::{IntValue, Token, KEYWORD_TOKEN};
 use anyhow::anyhow;
-use std::{fmt::Display, path::Path, rc::Rc};
+use std::fmt::Display;
+use std::path::Path;
 
 // A Position describes the location of a rune of input.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
-    pub path: Rc<String>,
-    //pub path: &'a Path, // path to file (only for error messages)
     pub line: u32, // 1-based line number; 0 if line unknown
     pub col: u32,  // 1-based column (rune) number; 0 if column unknown
 }
@@ -38,12 +37,8 @@ impl Display for Position {
 }
 
 impl Position {
-    pub fn new(path: &Rc<String>) -> Position {
-        Position {
-            path: Rc::clone(path),
-            line: 1,
-            col: 1,
-        }
+    pub fn new() -> Position {
+        Position { line: 1, col: 1 }
     }
 }
 
@@ -55,6 +50,7 @@ pub struct Comment {
 }
 
 pub struct Scanner<'a> {
+    path: &'a Path,
     rest: &'a str,
     token: &'a str,                    //  slice with current token
     pub pos: Position,                 // current input position
@@ -86,15 +82,10 @@ impl<'a> Scanner<'a> {
         data: &'a str,
         keep_comments: bool,
     ) -> anyhow::Result<Scanner<'a>> {
-        let path_str = path
-            .as_ref()
-            .to_str()
-            .ok_or(anyhow!("not utf"))?
-            .to_string();
-        let path = Rc::new(path_str);
         //let pos = Position::new();//path.as_ref());
         Ok(Scanner {
-            pos: Position::new(&path),
+            path: path.as_ref(),
+            pos: Position::new(),
             indentstk: vec![0],
             line_start: true,
             keep_comments,
@@ -107,7 +98,7 @@ impl<'a> Scanner<'a> {
             token_buf: TokenValue {
                 kind: Token::Illegal,
                 raw: "".to_string(),
-                pos: Position::new(&path),
+                pos: Position::new(),
             },
         })
     }
@@ -150,7 +141,7 @@ impl<'a> Scanner<'a> {
 
     fn mark_start_token(&mut self) {
         self.token = self.rest;
-        self.token_buf.pos = self.pos.clone();
+        self.token_buf.pos = self.pos;
     }
 
     fn mark_end_token(&mut self) {
@@ -239,12 +230,12 @@ impl<'a> Scanner<'a> {
                     if self.dents < 0 {
                         self.dents += 1;
                         self.token_buf.kind = Token::Outdent;
-                        self.token_buf.pos = self.pos.clone();
+                        self.token_buf.pos = self.pos;
                         return Ok(());
                     } else {
                         self.dents -= 1;
                         self.token_buf.kind = Token::Indent;
-                        self.token_buf.pos = self.pos.clone();
+                        self.token_buf.pos = self.pos;
                         return Ok(());
                     }
                 }
@@ -263,7 +254,7 @@ impl<'a> Scanner<'a> {
                     if self.keep_comments {
                         self.mark_start_token();
                     }
-                    let comment_pos = self.pos.clone();
+                    let comment_pos = self.pos;
                     // Consume up to newline (included).
                     while c != '\0' && c != '\n' {
                         self.read();
@@ -287,7 +278,7 @@ impl<'a> Scanner<'a> {
 
                 // newline
                 if c == '\n' {
-                    let newline_pos = self.pos.clone();
+                    let newline_pos = self.pos;
                     self.line_start = true;
 
                     // Ignore newlines within expressions (common case).
@@ -352,7 +343,7 @@ impl<'a> Scanner<'a> {
                     self.read();
                     self.mark_end_token();
                     self.token_buf.kind = Token::Comma;
-                    self.token_buf.pos = self.pos.clone();
+                    self.token_buf.pos = self.pos;
                     return Ok(());
                 }
 
@@ -464,7 +455,7 @@ impl<'a> Scanner<'a> {
                 match c {
                     '=' | '<' | '>' | '!' | '+' | '-' | '%' | '/' | '&' | '|' | '^' => {
                         // possibly followed by '='
-                        let start = self.pos.clone();
+                        let start = self.pos;
                         self.read();
                         if self.peek() == '=' {
                             self.read();
@@ -664,7 +655,6 @@ impl<'a> Scanner<'a> {
     }
 
     fn scan_string(&mut self, quote: char) -> anyhow::Result<()> {
-        //let start = self.pos.clone();
         let triple = self.rest.starts_with(if quote == '\'' {
             TRIPLE_QUOTE
         } else {
@@ -757,7 +747,7 @@ impl<'a> Scanner<'a> {
         // - traditional octal: 0755
         // https://docs.python.org/2/reference/lexical_analysis.html#integer-and-long-integer-literals
 
-        let start = self.pos.clone();
+        let start = self.pos;
         let mut fraction = false;
         let mut exponent = false;
         if c == '.' {

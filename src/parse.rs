@@ -52,7 +52,7 @@ pub fn parse<'b, P: AsRef<Path>>(
     mode: Mode,
 ) -> Result<&'b FileUnit<'b>> {
     let mut p = Parser::new(bump, path, src, mode)?;
-    p.parse_file(path.as_ref())
+    p.parse_file()
 }
 
 pub fn parse_expr<'b, P: AsRef<Path>>(
@@ -73,6 +73,7 @@ where
     tok: TokenValue,
     pos: Position,
     bump: &'b Bump,
+    path: &'b Path,
 }
 
 impl<'a, 'b> Parser<'a, 'b> {
@@ -80,8 +81,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut sc = Scanner::new(path, src, mode == Mode::RetainComments)?;
         // Read first lookahead token.
         let tok = sc.next_token()?;
-        let pos = sc.pos.clone();
-        Ok(Parser { sc, tok, pos, bump })
+        let pos = sc.pos;
+        Ok(Parser {
+            sc,
+            tok,
+            pos,
+            bump,
+            path: path.as_ref(),
+        })
     }
 
     fn line_comments(&self) -> Vec<Comment> {
@@ -95,14 +102,14 @@ impl<'a, 'b> Parser<'a, 'b> {
     // next_token advances the scanner and returns the position of the
     // previous token.
     fn next_token(&mut self) -> Result<Position> {
-        let old_pos = self.sc.pos.clone();
+        let old_pos = self.sc.pos;
         self.tok = self.sc.next_token()?;
         self.pos = old_pos;
         // enable to see the token stream
         if DEBUG {
             println!("next_token: {} {}", self.tok.kind, self.pos);
         }
-        Ok(self.pos.clone())
+        Ok(self.pos)
     }
 
     fn consume(&mut self, expected: Token) -> Result<Position> {
@@ -118,7 +125,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // file_input = (NEWLINE | stmt)* EOF
-    fn parse_file(&mut self, path: &'b Path) -> Result<&'b FileUnit<'b>>
+    fn parse_file(&mut self) -> Result<&'b FileUnit<'b>>
     where
         'b: 'a,
     {
@@ -131,7 +138,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.parse_stmt(&mut stmts)?;
         }
         let f = self.bump.alloc(FileUnit {
-            path,
+            path: self.path,
             stmts: self.bump.alloc_slice_copy(&stmts.into_boxed_slice()),
             line_comments: self.line_comments(),
             suffix_comments: self.suffix_comments(),
@@ -152,19 +159,19 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn parse_def_stmt(&mut self) -> Result<StmtRef<'b>> {
         self.next_token()?; // consume DEF
-        let def_pos = self.pos.clone();
+        let def_pos = self.pos;
         let id = self.parse_ident()?;
         self.consume(Token::LParen)?;
-        let lparen: Position = self.pos.clone();
+        let lparen: Position = self.pos;
         let params = self.parse_params()?;
         self.consume(Token::RParen)?;
-        let rparen = self.pos.clone();
+        let rparen = self.pos;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let stmt: &'b mut Stmt<'b> = self.bump.alloc(Stmt {
             span: Span {
-                start: def_pos.clone(),
-                end: def_pos.clone(),
+                start: def_pos,
+                end: def_pos,
             },
             data: DefStmt {
                 def_pos,
@@ -180,14 +187,14 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn parse_if_stmt(&mut self) -> Result<StmtRef<'b>> {
         self.next_token()?;
-        let if_pos = self.pos.clone(); // consume IF
+        let if_pos = self.pos; // consume IF
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let if_stmt = self.bump.alloc(Stmt {
             span: Span {
-                start: if_pos.clone(),
-                end: if_pos.clone(),
+                start: if_pos,
+                end: if_pos,
             },
             data: IfStmt {
                 if_pos,
@@ -201,17 +208,17 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut elifs = vec![];
         while self.tok.kind == Token::Elif {
             let elif_pos = self.next_token()?;
-            // = self.pos.clone(); // consume ELIF
+            // = self.pos; // consume ELIF
             let cond = self.parse_test()?;
             self.consume(Token::Colon)?;
             let body = self.parse_suite()?;
             elifs.push(self.bump.alloc(Stmt {
                 span: Span {
-                    start: elif_pos.clone(),
-                    end: elif_pos.clone(),
+                    start: elif_pos,
+                    end: elif_pos,
                 },
                 data: IfStmt {
-                    if_pos: elif_pos.clone(),
+                    if_pos: elif_pos,
                     cond,
                     then_arm: body,
                     else_pos: None,
@@ -252,7 +259,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                             },
                         ..
                     } => {
-                        *else_pos = Some(tmp.span.start.clone());
+                        *else_pos = Some(tmp.span.start);
                         *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
                         tmp = next_last_if;
                     }
@@ -267,7 +274,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         },
                     ..
                 } => {
-                    *else_pos = Some(tmp.span.start.clone());
+                    *else_pos = Some(tmp.span.start);
                     *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
                 }
                 _ => unreachable!(),
@@ -300,8 +307,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let body = self.parse_suite()?;
         let for_stmt = self.bump.alloc(Stmt {
             span: Span {
-                start: for_pos.clone(),
-                end: for_pos.clone(),
+                start: for_pos,
+                end: for_pos,
             },
             data: ForStmt {
                 for_pos,
@@ -335,8 +342,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let list = self.bump.alloc_slice_copy(&list.into_boxed_slice());
         let for_loop_vars = self.bump.alloc(Expr {
             span: Span {
-                start: v.span.start.clone(),
-                end: v.span.start.clone(), /* todo */
+                start: v.span.start,
+                end: v.span.start, /* todo */
             },
             data: ExprData::TupleExpr {
                 lparen: None,
@@ -354,8 +361,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let body = self.parse_suite()?;
         let while_stmt = self.bump.alloc(Stmt {
             span: Span {
-                start: while_pos.clone(),
-                end: while_pos.clone(),
+                start: while_pos,
+                end: while_pos,
             },
             data: StmtData::WhileStmt {
                 while_pos,
@@ -374,7 +381,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         if !matches!(self.tok.kind, Token::String { .. }) {
             return Err(anyhow!(
                 "{} first operand of load statement must be a string literal",
-                self.pos.clone()
+                self.pos
             ));
         }
         let module = self.parse_primary()?; // .(*Literal)
@@ -391,7 +398,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // load("module", "id")
                     // To name is same as original.
                     self.next_token()?;
-                    let id = self.bump.alloc(Ident::new(self.tok.pos.clone(), decoded));
+                    let id = self.bump.alloc(Ident::new(self.tok.pos, decoded));
                     to.push(id);
                     from.push(id);
                 }
@@ -422,10 +429,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                             token: Token::String { decoded },
                             token_pos,
                             ..
-                        } => from.push(
-                            self.bump
-                                .alloc(Ident::new(token_pos.clone(), decoded.clone())),
-                        ),
+                        } => from.push(self.bump.alloc(Ident::new(*token_pos, decoded.clone()))),
                         _ => unreachable!(),
                     }
                 }
@@ -450,8 +454,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let from = self.bump.alloc_slice_copy(&from.into_boxed_slice());
         let load_stmt = self.bump.alloc(Stmt {
             span: Span {
-                start: load_pos.clone(),
-                end: load_pos.clone(),
+                start: load_pos,
+                end: load_pos,
             },
             data: StmtData::LoadStmt {
                 load_pos,
@@ -504,8 +508,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 let return_stmt = self.bump.alloc(Stmt {
                     span: Span {
-                        start: pos.clone(),
-                        end: pos.clone(),
+                        start: pos,
+                        end: pos,
                     },
                     data: StmtData::ReturnStmt {
                         return_pos: pos,
@@ -519,8 +523,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let pos = self.next_token()?; // consume it
                 let branch_stmt = self.bump.alloc(Stmt {
                     span: Span {
-                        start: pos.clone(),
-                        end: pos.clone(),
+                        start: pos,
+                        end: pos,
                     },
                     data: StmtData::BranchStmt {
                         token: tok,
@@ -533,7 +537,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             _ => {}
         }
         // Assignment
-        let pos = self.pos.clone();
+        let pos = self.pos;
         let x = self.parse_expr(false)?;
         match self.tok.kind {
             Token::Eq
@@ -553,8 +557,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let rhs = self.parse_expr(false)?;
                 let assign_stmt = self.bump.alloc(Stmt {
                     span: Span {
-                        start: pos.clone(),
-                        end: pos.clone(),
+                        start: pos,
+                        end: pos,
                     },
                     data: StmtData::AssignStmt {
                         op_pos: pos,
@@ -571,7 +575,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         // Expression statement (e.g. function call, doc string).
         let expr_stmt = self.bump.alloc(Stmt {
             span: Span {
-                start: pos.clone(),
+                start: pos,
                 end: pos,
             },
             data: StmtData::ExprStmt { x },
@@ -601,8 +605,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             let else_ = self.parse_test()?;
             return Ok(self.bump.alloc(Expr {
                 span: Span {
-                    start: if_pos.clone(),
-                    end: if_pos.clone(),
+                    start: if_pos,
+                    end: if_pos,
                 },
                 data: ExprData::CondExpr {
                     if_pos,
@@ -619,7 +623,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn parse_ident(&mut self) -> Result<&'b Ident> {
         match self.tok.kind.clone() {
             Token::Ident { name } => {
-                let id = self.bump.alloc(Ident::new(self.tok.pos.clone(), name));
+                let id = self.bump.alloc(Ident::new(self.tok.pos, name));
                 self.next_token()?;
                 Ok(id)
             }
@@ -667,15 +671,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                     if op == Token::StarStar || matches!(self.tok.kind, Token::Ident { .. }) {
                         let ident = self.parse_ident()?;
                         let ident = self.bump.alloc(ident.as_expr());
-                        (Some(&*ident), self.pos.clone())
+                        (Some(&*ident), self.pos)
                     } else {
-                        (None, op_pos.clone())
+                        (None, op_pos)
                     };
                 let unary_expr = self.bump.alloc(Expr {
-                    span: Span {
-                        start: op_pos.clone(),
-                        end,
-                    },
+                    span: Span { start: op_pos, end },
                     data: ExprData::UnaryExpr { op_pos, op, x },
                 });
                 params.push(&*unary_expr);
@@ -692,8 +693,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let dflt = self.parse_test()?;
                 let binary_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: id.span.start.clone(),
-                        end: dflt.span.end.clone(),
+                        start: id.span.start,
+                        end: dflt.span.end,
                     },
                     data: ExprData::BinaryExpr {
                         x: id,
@@ -729,8 +730,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
         let tuple_expr = self.bump.alloc(Expr {
             span: Span {
-                start: x.span.start.clone(),
-                end: self.pos.clone(),
+                start: x.span.start,
+                end: self.pos,
             },
             data: ExprData::TupleExpr {
                 lparen: None,
@@ -754,8 +755,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let ident = self.parse_ident()?;
                 let ident_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: ident.name_pos.clone(),
-                        end: ident.name_pos.clone(),
+                        start: ident.name_pos,
+                        end: ident.name_pos,
                     },
                     data: ExprData::Ident(ident),
                 });
@@ -767,12 +768,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             | Token::String { .. }
             | Token::Bytes { .. } => {
                 let token = self.tok.kind.clone();
-                let token_pos = self.pos.clone();
+                let token_pos = self.pos;
                 let raw = self.tok.raw.clone();
                 let pos = self.next_token()?;
                 let literal = self.bump.alloc(Expr {
                     span: Span {
-                        start: pos.clone(),
+                        start: pos,
                         end: pos,
                     },
                     data: ExprData::Literal {
@@ -794,8 +795,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let rparen = self.next_token()?;
                     let tuple_expr = self.bump.alloc(Expr {
                         span: Span {
-                            start: lparen.clone(),
-                            end: rparen.clone(),
+                            start: lparen,
+                            end: rparen,
                         },
                         data: ExprData::TupleExpr {
                             lparen: Some(lparen),
@@ -809,8 +810,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let rparen = self.consume(Token::RParen)?;
                 let paren_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: lparen.clone(),
-                        end: rparen.clone(),
+                        start: lparen,
+                        end: rparen,
                     },
                     data: ExprData::ParenExpr {
                         lparen,
@@ -827,8 +828,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let x = self.parse_primary_with_suffix()?;
                 let unary_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: pos.clone(),
-                        end: pos.clone(),
+                        start: pos,
+                        end: pos,
                     },
                     data: ExprData::UnaryExpr {
                         op_pos: pos,
@@ -858,8 +859,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             let rbrack = self.next_token()?;
             let list_expr = self.bump.alloc(Expr {
                 span: Span {
-                    start: lbrack.clone(),
-                    end: rbrack.clone(),
+                    start: lbrack,
+                    end: rbrack,
                 },
                 data: ExprData::ListExpr {
                     lbrack,
@@ -887,8 +888,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
         let list_expr = self.bump.alloc(Expr {
             span: Span {
-                start: lbrack.clone(),
-                end: rbrack.clone(),
+                start: lbrack,
+                end: rbrack,
             },
             data: ExprData::ListExpr {
                 lbrack,
@@ -910,8 +911,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             let rbrace = self.next_token()?;
             let dict_expr = self.bump.alloc(Expr {
                 span: Span {
-                    start: lbrace.clone(),
-                    end: rbrace.clone(),
+                    start: lbrace,
+                    end: rbrace,
                 },
                 data: ExprData::DictExpr {
                     lbrace,
@@ -942,8 +943,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let list = self.bump.alloc_slice_copy(&entries.into_boxed_slice());
         let dict_expr = self.bump.alloc(Expr {
             span: Span {
-                start: lbrace.clone(),
-                end: rbrace.clone(),
+                start: lbrace,
+                end: rbrace,
             },
             data: ExprData::DictExpr {
                 lbrace,
@@ -961,8 +962,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let v = self.parse_test()?;
         let dict_entry = self.bump.alloc(Expr {
             span: Span {
-                start: k.span.start.clone(),
-                end: v.span.end.clone(),
+                start: k.span.start,
+                end: v.span.end,
             },
             data: ExprData::DictEntry {
                 key: k,
@@ -1006,8 +1007,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         };
         let call_expr = self.bump.alloc(Expr {
             span: Span {
-                start: func.span.start.clone(),
-                end: rparen.clone(),
+                start: func.span.start,
+                end: rparen,
             },
             data: ExprData::CallExpr {
                 func,
@@ -1037,8 +1038,8 @@ impl<'a, 'b> Parser<'a, 'b> {
 
         let lambda_expr = self.bump.alloc(Expr {
             span: Span {
-                start: lambda_pos.clone(),
-                end: body.span.end.clone(),
+                start: lambda_pos,
+                end: body.span.end,
             },
             data: ExprData::LambdaExpr {
                 lambda_pos,
@@ -1100,8 +1101,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let clauses = self.bump.alloc_slice_copy(&clauses.into_boxed_slice());
         let comprehension = self.bump.alloc(Expr {
             span: Span {
-                start: lbrace.clone(),
-                end: rbrace.clone(),
+                start: lbrace,
+                end: rbrace,
             },
             data: ExprData::Comprehension {
                 curly: end_brace == Token::RBrace,
@@ -1135,8 +1136,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             let x = self.parse_test_prec(prec)?;
             let unary_expr = self.bump.alloc(Expr {
                 span: Span {
-                    start: op_pos.clone(),
-                    end: x.span.end.clone(),
+                    start: op_pos,
+                    end: x.span.end,
                 },
                 data: ExprData::UnaryExpr {
                     op_pos,
@@ -1170,8 +1171,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let x = self.parse_test()?;
                 let unary_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: op_pos.clone(),
-                        end: x.span.end.clone(),
+                        start: op_pos,
+                        end: x.span.end,
                     },
                     data: ExprData::UnaryExpr {
                         op_pos,
@@ -1200,8 +1201,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let y = self.parse_test()?;
                 x = self.bump.alloc(Expr {
                     span: Span {
-                        start: x.span.start.clone(),
-                        end: y.span.end.clone(),
+                        start: x.span.start,
+                        end: y.span.end,
                     },
                     data: ExprData::BinaryExpr {
                         x,
@@ -1279,8 +1280,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             let y = self.parse_test_prec(op_prec + 1)?;
             let binary_expr = self.bump.alloc(Expr {
                 span: Span {
-                    start: x.span.start.clone(),
-                    end: y.span.end.clone(),
+                    start: x.span.start,
+                    end: y.span.end,
                 },
                 data: ExprData::BinaryExpr { op_pos, op, x, y },
             });
@@ -1301,11 +1302,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 Token::Dot => {
                     let dot = self.next_token()?;
                     let id = self.parse_ident()?;
-                    let name_pos = self.pos.clone();
+                    let name_pos = self.pos;
                     let dot_expr = self.bump.alloc(Expr {
                         span: Span {
-                            start: x.span.start.clone(),
-                            end: name_pos.clone(),
+                            start: x.span.start,
+                            end: name_pos,
                         },
                         data: ExprData::DotExpr {
                             dot,
@@ -1335,8 +1336,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let rbrack = self.next_token()?;
                 let index_expr = self.bump.alloc(Expr {
                     span: Span {
-                        start: x.span.start.clone(),
-                        end: rbrack.clone(),
+                        start: x.span.start,
+                        end: rbrack,
                     },
                     data: ExprData::IndexExpr {
                         x,
@@ -1368,8 +1369,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         let rbrack = self.consume(Token::RBrack)?;
         let slice_expr = self.bump.alloc(Expr {
             span: Span {
-                start: lbrack.clone(),
-                end: rbrack.clone(),
+                start: lbrack,
+                end: rbrack,
             },
             data: ExprData::SliceExpr {
                 x,
@@ -1391,8 +1392,6 @@ fn terminates_expr_list(tok: &Token) -> bool {
 
 #[cfg(test)]
 mod test {
-
-    use std::rc::Rc;
 
     use super::*;
     struct TestCase {
@@ -1674,19 +1673,11 @@ foo() #Suffix
             res.line_comments,
             vec![
                 Comment {
-                    start: Position {
-                        path: Rc::new("foo.star".to_string()),
-                        line: 1,
-                        col: 1
-                    },
+                    start: Position { line: 1, col: 1 },
                     text: "# Hello world".to_string()
                 },
                 Comment {
-                    start: Position {
-                        path: Rc::new("foo.star".to_string()),
-                        line: 3,
-                        col: 1
-                    },
+                    start: Position { line: 3, col: 1 },
                     text: "# Goodbye world".to_string()
                 }
             ]
@@ -1694,11 +1685,7 @@ foo() #Suffix
         assert_eq!(
             res.suffix_comments,
             vec![Comment {
-                start: Position {
-                    path: Rc::new("foo.star".to_string()),
-                    line: 2,
-                    col: 7
-                },
+                start: Position { line: 2, col: 7 },
                 text: "#Suffix".to_string()
             }]
         );

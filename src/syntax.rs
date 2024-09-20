@@ -45,8 +45,8 @@ impl<'a> NodeData for FileUnit<'a> {
             let first = self.stmts.first().unwrap();
             let last = self.stmts.last().unwrap();
             Some(Span {
-                start: first.span.start.clone(),
-                end: last.span.end.clone(),
+                start: first.span.start,
+                end: last.span.end,
             })
         }
     }
@@ -60,7 +60,7 @@ impl<'a> NodeData for FileUnit<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span {
     pub start: Position,
     pub end: Position,
@@ -713,8 +713,8 @@ impl Ident {
     pub fn as_expr(&self) -> Expr {
         Expr {
             span: Span {
-                start: self.name_pos.clone(),
-                end: self.name_pos.clone(),
+                start: self.name_pos,
+                end: self.name_pos,
             },
             data: ExprData::Ident(self),
         }
