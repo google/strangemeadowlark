@@ -247,3 +247,14 @@ pub fn quote(s: &str) -> String {
     buf.push('"');
     buf
 }
+
+// Quote returns a Starlark literal that denotes s.
+// Not handling invalid literals.
+pub fn quote_bytes(b: &[u8]) -> String {
+    let mut buf = "\"".to_string();
+    for c in b {
+        buf.push_str(format!("\\x{:02x}", c).as_str());
+    }
+    buf.push('"');
+    buf
+}

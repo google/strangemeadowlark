@@ -1,4 +1,7 @@
-use crate::{Clause, Expr, ExprData, FileUnit, Span, Stmt};
+use crate::{
+    quote::{quote, quote_bytes},
+    Clause, Expr, ExprData, FileUnit, Literal, Span, Stmt,
+};
 use anyhow::Result;
 use std::fmt;
 
@@ -49,7 +52,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     }
 
     fn print_suffix_newline(&mut self, current: &Span) -> Result<()> {
-        for comment in &self.unit.suffix_comments {
+        for comment in self.unit.suffix_comments {
             if comment.start.line == current.start.line {
                 write!(self.writer, " {}", comment.text)?;
                 break;
@@ -59,7 +62,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     }
 
     fn print_line_comments(&mut self, up_to: &Span) -> Result<()> {
-        for comment in &self.unit.line_comments {
+        for comment in self.unit.line_comments {
             if comment.start.line <= self.last_comment_line {
                 continue;
             }
@@ -320,7 +323,26 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.print_comma_separated(list.iter())?;
                 write!(self.writer, "]")?;
             }
-            crate::ExprData::Literal { raw, .. } => write!(self.writer, "{}", raw)?,
+            crate::ExprData::Literal {
+                token: Literal::String(decoded),
+                ..
+            } => write!(self.writer, "{}", quote(decoded))?,
+            crate::ExprData::Literal {
+                token: Literal::Bytes(decoded),
+                ..
+            } => write!(self.writer, "{}", quote_bytes(decoded))?,
+            crate::ExprData::Literal {
+                token: Literal::Int(int_value),
+                ..
+            } => write!(self.writer, "{}", int_value)?,
+            crate::ExprData::Literal {
+                token: Literal::BigInt(bigint_value),
+                ..
+            } => write!(self.writer, "{}", bigint_value)?,
+            crate::ExprData::Literal {
+                token: Literal::Float(float_value),
+                ..
+            } => write!(self.writer, "{}", float_value)?,
             crate::ExprData::ParenExpr { x, .. } => {
                 write!(self.writer, "(")?;
                 self.print_expr(x)?;
@@ -380,7 +402,7 @@ for x in foo():
   # Comment in a different place.
   continue
   break
-  return {'foo': 'bar'}
+  return {\"foo\": \"bar\"}
 
 ";
         let bump = Bump::new();

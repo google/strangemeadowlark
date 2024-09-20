@@ -69,7 +69,7 @@ struct Parser<'a, 'b>
 where
     'b: 'a,
 {
-    sc: Scanner<'a>,
+    sc: Scanner<'a, 'b>,
     tok: TokenValue,
     pos: Position,
     bump: &'b Bump,
@@ -78,7 +78,7 @@ where
 
 impl<'a, 'b> Parser<'a, 'b> {
     fn new<P: AsRef<Path>>(bump: &'b Bump, path: &'b P, src: &'b str, mode: Mode) -> Result<Self> {
-        let mut sc = Scanner::new(path, src, mode == Mode::RetainComments)?;
+        let mut sc = Scanner::new(bump, path, src, mode == Mode::RetainComments)?;
         // Read first lookahead token.
         let tok = sc.next_token()?;
         let pos = sc.pos;
@@ -89,14 +89,6 @@ impl<'a, 'b> Parser<'a, 'b> {
             bump,
             path: path.as_ref(),
         })
-    }
-
-    fn line_comments(&self) -> Vec<Comment> {
-        self.sc.line_comments.clone()
-    }
-
-    fn suffix_comments(&self) -> Vec<Comment> {
-        self.sc.suffix_comments.clone()
     }
 
     // next_token advances the scanner and returns the position of the
@@ -126,9 +118,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     // file_input = (NEWLINE | stmt)* EOF
     fn parse_file(&mut self) -> Result<&'b FileUnit<'b>>
-    where
-        'b: 'a,
-    {
+where {
         let mut stmts: Vec<StmtRef<'b>> = vec![];
         while self.tok.kind != Token::Eof {
             if self.tok.kind == Token::Newline {
@@ -137,11 +127,14 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             self.parse_stmt(&mut stmts)?;
         }
+        let line_comments = &*self.bump.alloc_slice_copy(&self.sc.line_comments);
+        let suffix_comments = &*self.bump.alloc_slice_copy(&self.sc.suffix_comments);
+
         let f = self.bump.alloc(FileUnit {
             path: self.path,
             stmts: self.bump.alloc_slice_copy(&stmts.into_boxed_slice()),
-            line_comments: self.line_comments(),
-            suffix_comments: self.suffix_comments(),
+            line_comments,
+            suffix_comments,
         });
         Ok(f)
     }
@@ -398,7 +391,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // load("module", "id")
                     // To name is same as original.
                     self.next_token()?;
-                    let id = self.bump.alloc(Ident::new(self.tok.pos, decoded));
+                    let id = self
+                        .bump
+                        .alloc(Ident::new(self.tok.pos, self.bump.alloc_str(&decoded)));
                     to.push(id);
                     from.push(id);
                 }
@@ -426,10 +421,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let lit = self.parse_primary()?; // .(*Literal)
                     match &lit.data {
                         ExprData::Literal {
-                            token: Token::String { decoded },
+                            token: Literal::String(decoded),
                             token_pos,
                             ..
-                        } => from.push(self.bump.alloc(Ident::new(*token_pos, decoded.clone()))),
+                        } => from.push(self.bump.alloc(Ident::new(*token_pos, decoded))),
                         _ => unreachable!(),
                     }
                 }
@@ -620,10 +615,12 @@ impl<'a, 'b> Parser<'a, 'b> {
         Ok(x)
     }
 
-    fn parse_ident(&mut self) -> Result<&'b Ident> {
+    fn parse_ident(&mut self) -> Result<&'b Ident<'b>> {
         match self.tok.kind.clone() {
             Token::Ident { name } => {
-                let id = self.bump.alloc(Ident::new(self.tok.pos, name));
+                let id = self
+                    .bump
+                    .alloc(Ident::new(self.tok.pos, self.bump.alloc_str(&name)));
                 self.next_token()?;
                 Ok(id)
             }
@@ -768,8 +765,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             | Token::String { .. }
             | Token::Bytes { .. } => {
                 let token = self.tok.kind.clone();
+                let literal_token = self.sc.literal_from_token(token);
                 let token_pos = self.pos;
-                let raw = self.tok.raw.clone();
                 let pos = self.next_token()?;
                 let literal = self.bump.alloc(Expr {
                     span: Span {
@@ -777,9 +774,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                         end: pos,
                     },
                     data: ExprData::Literal {
-                        token,
+                        token: literal_token,
                         token_pos,
-                        raw,
                     },
                 });
                 Ok(literal)
@@ -1672,21 +1668,21 @@ foo() #Suffix
         assert_eq!(
             res.line_comments,
             vec![
-                Comment {
+                &Comment {
                     start: Position { line: 1, col: 1 },
-                    text: "# Hello world".to_string()
+                    text: "# Hello world"
                 },
-                Comment {
+                &Comment {
                     start: Position { line: 3, col: 1 },
-                    text: "# Goodbye world".to_string()
+                    text: "# Goodbye world"
                 }
             ]
         );
         assert_eq!(
             res.suffix_comments,
-            vec![Comment {
+            vec![&Comment {
                 start: Position { line: 2, col: 7 },
-                text: "#Suffix".to_string()
+                text: "#Suffix"
             }]
         );
         Ok(())

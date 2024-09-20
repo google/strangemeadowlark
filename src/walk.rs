@@ -248,8 +248,8 @@ mod test {
         parse,
         scan::Position,
         syntax::{Ident, Span},
-        token::{IntValue, Token},
-        Mode,
+        token::Token,
+        Literal, Mode,
     };
 
     use super::*;
@@ -265,17 +265,17 @@ mod test {
             start: fake_pos,
             end: fake_pos,
         };
-        let foobar_ident = Ident::new(fake_pos, "foobar".to_string());
+        let foobar_ident = Ident::new(fake_pos, "foobar");
         let foobar = Expr {
             span: span,
             data: ExprData::Ident(&foobar_ident),
         };
-        let x_ident = Ident::new(fake_pos, "x".to_string());
+        let x_ident = Ident::new(fake_pos, "x");
         let x = Expr {
             span: span,
             data: ExprData::Ident(&x_ident),
         };
-        let y_ident = Ident::new(fake_pos, "y".to_string());
+        let y_ident = Ident::new(fake_pos, "y");
         let y = Expr {
             span: span,
             data: ExprData::Ident(&y_ident),
@@ -284,10 +284,7 @@ mod test {
             span: span,
             data: ExprData::Literal {
                 token_pos: fake_pos,
-                token: Token::Int {
-                    decoded: IntValue::Int(3),
-                },
-                raw: "3".to_string(),
+                token: &Literal::Int(3),
             },
         };
         let y_expr = Expr {
@@ -300,7 +297,7 @@ mod test {
             },
         };
         let foobar_expr = Expr {
-            span,
+            span: span,
             data: ExprData::CallExpr {
                 func: &foobar,
                 lparen: fake_pos,
@@ -315,8 +312,8 @@ mod test {
         let file_unit = FileUnit {
             path: Path::new("path"),
             stmts: &[&foobar_stmt],
-            line_comments: vec![],
-            suffix_comments: vec![],
+            line_comments: &[],
+            suffix_comments: &[],
         };
         let test_cases = vec![TestCase {
             input: "foobar(x, y=3)",

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use lazy_static::lazy_static;
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntValue {
@@ -229,41 +228,40 @@ impl Display for Token {
     }
 }
 
-lazy_static! {
-    pub static ref KEYWORD_TOKEN: HashMap<&'static str, Token> = [
-        ("in", Token::In),
-        ("async", Token::Illegal),
-        ("await", Token::Illegal),
-        ("else", Token::Else),
-        ("try", Token::Illegal),
-        ("raise", Token::Illegal),
-        ("import", Token::Illegal),
-        ("except", Token::Illegal),
-        ("nonlocal", Token::Illegal),
-        ("return", Token::Return),
-        ("lambda", Token::Lambda),
-        ("break", Token::Break),
-        ("load", Token::Load),
-        ("continue", Token::Continue),
-        ("if", Token::If),
-        ("with", Token::Illegal),
-        ("is", Token::Illegal),
-        ("global", Token::Illegal),
-        ("for", Token::For),
-        ("as", Token::Illegal),
-        ("or", Token::Or),
-        ("while", Token::While),
-        ("pass", Token::Pass),
-        ("from", Token::Illegal),
-        ("del", Token::Illegal),
-        ("class", Token::Illegal),
-        ("finally", Token::Illegal),
-        ("yield", Token::Illegal),
-        ("elif", Token::Elif),
-        ("not", Token::Not),
-        ("and", Token::And),
-        ("def", Token::Def),
-    ]
-    .into_iter()
-    .collect();
+pub fn keyword(text: &str) -> Option<Token> {
+    match text {
+        "in" => Some(Token::In),
+        "async" => Some(Token::Illegal),
+        "await" => Some(Token::Illegal),
+        "else" => Some(Token::Else),
+        "try" => Some(Token::Illegal),
+        "raise" => Some(Token::Illegal),
+        "import" => Some(Token::Illegal),
+        "except" => Some(Token::Illegal),
+        "nonlocal" => Some(Token::Illegal),
+        "return" => Some(Token::Return),
+        "lambda" => Some(Token::Lambda),
+        "break" => Some(Token::Break),
+        "load" => Some(Token::Load),
+        "continue" => Some(Token::Continue),
+        "if" => Some(Token::If),
+        "with" => Some(Token::Illegal),
+        "is" => Some(Token::Illegal),
+        "global" => Some(Token::Illegal),
+        "for" => Some(Token::For),
+        "as" => Some(Token::Illegal),
+        "or" => Some(Token::Or),
+        "while" => Some(Token::While),
+        "pass" => Some(Token::Pass),
+        "from" => Some(Token::Illegal),
+        "del" => Some(Token::Illegal),
+        "class" => Some(Token::Illegal),
+        "finally" => Some(Token::Illegal),
+        "yield" => Some(Token::Illegal),
+        "elif" => Some(Token::Elif),
+        "not" => Some(Token::Not),
+        "and" => Some(Token::And),
+        "def" => Some(Token::Def),
+        _ => None,
+    }
 }

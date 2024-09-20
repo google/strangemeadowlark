@@ -14,18 +14,14 @@
 
 use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
+use num_bigint::BigInt;
+
 use crate::{
     binding::{Binding, Function},
+    quote::{quote, quote_bytes},
     scan::{Comment, Position},
     token::Token,
 };
-
-trait NodeData {
-    fn span(&self) -> Option<Span>;
-    fn comments(&self) -> Option<Comments>;
-
-    fn add_comment(&mut self, comment: Comment);
-}
 
 pub type StmtRef<'a> = &'a Stmt<'a>;
 
@@ -33,31 +29,8 @@ pub type StmtRef<'a> = &'a Stmt<'a>;
 pub struct FileUnit<'a> {
     pub path: &'a Path,
     pub stmts: &'a [StmtRef<'a>],
-    pub line_comments: Vec<Comment>, // list of full line comments (if keepComments)
-    pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
-}
-
-impl<'a> NodeData for FileUnit<'a> {
-    fn span(&self) -> Option<Span> {
-        if self.stmts.is_empty() {
-            None
-        } else {
-            let first = self.stmts.first().unwrap();
-            let last = self.stmts.last().unwrap();
-            Some(Span {
-                start: first.span.start,
-                end: last.span.end,
-            })
-        }
-    }
-
-    fn comments(&self) -> Option<Comments> {
-        todo!()
-    }
-
-    fn add_comment(&mut self, _comment: Comment) {
-        todo!()
-    }
+    pub line_comments: &'a [&'a Comment<'a>], // list of full line comments (if keepComments)
+    pub suffix_comments: &'a [&'a Comment<'a>], // list of suffix comments (if keepComments)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,10 +39,10 @@ pub struct Span {
     pub end: Position,
 }
 
-pub struct Comments {
-    pub before: Vec<Comment>,
-    pub after: Vec<Comment>,
-    pub suffix: Vec<Comment>,
+pub struct Comments<'a> {
+    pub before: Vec<&'a Comment<'a>>,
+    pub after: Vec<&'a Comment<'a>>,
+    pub suffix: Vec<&'a Comment<'a>>,
 }
 
 #[derive(Debug)]
@@ -101,7 +74,7 @@ pub enum StmtData<'a> {
     },
     DefStmt {
         def_pos: Position,
-        name: &'a Ident,
+        name: &'a Ident<'a>,
         lparen: Position,
         params: &'a [ExprRef<'a>],
         rparen: Position,
@@ -130,9 +103,9 @@ pub enum StmtData<'a> {
     },
     LoadStmt {
         load_pos: Position,
-        module: ExprRef<'a>,   // Literal string
-        from: &'a [&'a Ident], // name defined in loading module
-        to: &'a [&'a Ident],   // name in loaded module
+        module: ExprRef<'a>,       // Literal string
+        from: &'a [&'a Ident<'a>], // name defined in loading module
+        to: &'a [&'a Ident<'a>],   // name in loaded module
         rparen_pos: Position,
     },
     ReturnStmt {
@@ -393,9 +366,9 @@ pub enum ExprData<'a> {
         x: ExprRef<'a>,
         dot: Position,
         name_pos: Position,
-        name: &'a Ident,
+        name: &'a Ident<'a>,
     },
-    Ident(&'a Ident),
+    Ident(&'a Ident<'a>),
     IndexExpr {
         x: ExprRef<'a>,
         lbrack: Position,
@@ -417,9 +390,8 @@ pub enum ExprData<'a> {
         rbrack: Position,
     },
     Literal {
-        token: Token, // = STRING | BYTES | INT | FLOAT
+        token: &'a Literal<'a>, // = STRING | BYTES | INT | FLOAT
         token_pos: Position,
-        raw: String, // uninterpreted text
     },
     ParenExpr {
         lparen: Position,
@@ -692,17 +664,53 @@ impl<'a> Display for ExprData<'a> {
     }
 }
 
+#[derive(Debug)]
+pub enum Literal<'a> {
+    String(&'a str),
+    Bytes(&'a [u8]),
+    Int(i64),
+    BigInt(BigInt),
+    Float(f64),
+}
+
+impl<'a> Display for Literal<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Literal::String(s) => write!(f, "{}", quote(s)),
+            Literal::Bytes(s) => write!(f, "{}", quote_bytes(s)),
+            Literal::Int(i) => write!(f, "{}", i),
+            Literal::BigInt(bi) => write!(f, "{}", bi),
+            Literal::Float(fl) => write!(f, "{}", fl),
+        }
+    }
+}
+
+impl<'a> PartialEq for Literal<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::String(l0), Self::String(r0)) => l0 == r0,
+            (Self::Bytes(l0), Self::Bytes(r0)) => l0 == r0,
+            (Self::Int(l0), Self::Int(r0)) => l0 == r0,
+            (Self::BigInt(l0), Self::BigInt(r0)) => l0 == r0,
+            (Self::Float(l0), Self::Float(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+impl<'a> Eq for Literal<'a> {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ident {
+pub struct Ident<'a> {
     pub name_pos: Position,
-    pub name: String,
+    pub name: &'a str,
 
     // Filled in by resolver.
     pub binding: RefCell<Option<Rc<Binding>>>,
 }
 
-impl Ident {
-    pub fn new(name_pos: Position, name: String) -> Self {
+impl<'a> Ident<'a> {
+    pub fn new(name_pos: Position, name: &'a str) -> Self {
         Ident {
             name_pos,
             name,

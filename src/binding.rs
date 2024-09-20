@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::scan::Position;
-use crate::syntax::{Expr, Ident, Stmt};
+use crate::syntax::{Expr, Stmt};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Scope {
@@ -26,7 +26,8 @@ pub struct Binding {
     // It is zero if Scope is Predeclared, Universal, or Undefined.
     pub index: u8,
 
-    pub first: *const Ident, // first binding use (iff Scope==Local/Free/Global)
+    // first binding use (iff Scope==Local/Free/Global)
+    pub first: usize, /*const Ident<'_>*/
 }
 
 impl Binding {

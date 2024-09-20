@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::token::{IntValue, Token, KEYWORD_TOKEN};
+use crate::token::{keyword, IntValue, Token};
+use crate::Literal;
 use anyhow::anyhow;
+use bumpalo::Bump;
 use std::fmt::Display;
 use std::path::Path;
 
@@ -44,46 +46,51 @@ impl Position {
 
 #[derive(Clone, Debug, PartialEq)]
 // A Comment represents a single # comment.
-pub struct Comment {
+pub struct Comment<'a> {
     pub start: Position,
-    pub text: String, // without trailing newline
+    pub text: &'a str, // without trailing newline
 }
 
-pub struct Scanner<'a> {
+pub struct Scanner<'a, 'b> {
+    bump: &'b Bump,
     path: &'a Path,
     rest: &'a str,
-    token: &'a str,                    //  slice with current token
-    pub pos: Position,                 // current input position
-    depth: usize,                      // nesting of [ ] { } ( )
-    indentstk: Vec<usize>,             // stack of indentation levels
+    pub token: &'a str,                        //  slice with current token
+    pub pos: Position,                         // current input position
+    depth: usize,                              // nesting of [ ] { } ( )
+    indentstk: Vec<usize>,                     // stack of indentation levels
     dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
     line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
     keep_comments: bool, // accumulate comments in slice
-    pub line_comments: Vec<Comment>, // list of full line comments (if keepComments)
-    pub suffix_comments: Vec<Comment>, // list of suffix comments (if keepComments)
-    pub token_buf: TokenValue,
+    pub line_comments: Vec<&'b Comment<'b>>, // list of full line comments (if keepComments)
+    pub suffix_comments: Vec<&'b Comment<'b>>, // list of suffix comments (if keepComments)
+    token_buf: TokenValue,
 }
 
 #[derive(Clone, Debug)]
 pub struct TokenValue {
     pub kind: Token,
     pub pos: Position, // start position of token
-    pub raw: String,   // raw text of token
 }
 
 const TRIPLE_QUOTE: &str = "'''";
 const TRIPLE_DOUBLE_QUOTE: &str = "\"\"\"";
 
-impl<'a> Scanner<'a> {
+impl<'a, 'b> Scanner<'a, 'b>
+where
+    'b: 'a,
+{
     // The scanner operates on &str, advancing one char at a time.
     // path is only used in error messages.
     pub fn new<P: AsRef<Path>>(
+        bump: &'b Bump,
         path: &'a P,
         data: &'a str,
         keep_comments: bool,
-    ) -> anyhow::Result<Scanner<'a>> {
+    ) -> anyhow::Result<Scanner<'a, 'b>> {
         //let pos = Position::new();//path.as_ref());
         Ok(Scanner {
+            bump,
             path: path.as_ref(),
             pos: Position::new(),
             indentstk: vec![0],
@@ -97,7 +104,6 @@ impl<'a> Scanner<'a> {
             suffix_comments: vec![],
             token_buf: TokenValue {
                 kind: Token::Illegal,
-                raw: "".to_string(),
                 pos: Position::new(),
             },
         })
@@ -147,8 +153,6 @@ impl<'a> Scanner<'a> {
     fn mark_end_token(&mut self) {
         let len = self.token.len() - self.rest.len();
         self.token = &self.token[..len];
-        // TODO: only create the string when necessary.
-        self.token_buf.raw = self.token.to_string()
     }
 
     // nextToken is called by the parser to obtain the next input token.
@@ -156,11 +160,25 @@ impl<'a> Scanner<'a> {
     // the token.
     //'
     // For all our input tokens, the associated data is token_buf.pos (the
-    // position where the token begins), token_buf.raw (the input string
+    // position where the token begins), token (the input string
     // corresponding to the token).  For string and int tokens, the decoded
     // field additionally contains the token's interpreted value.
     pub fn next_token(&mut self) -> anyhow::Result<TokenValue> {
         self.next_token_internal().map(|()| self.token_buf.clone())
+    }
+
+    pub fn literal_from_token(&self, token: Token) -> &'b Literal<'b> {
+        self.bump.alloc(match token {
+            Token::String { decoded } => Literal::String(self.bump.alloc_str(&decoded)),
+            Token::Int {
+                decoded: IntValue::Int(n),
+            } => Literal::Int(n),
+            Token::Int {
+                decoded: IntValue::BigInt(n),
+            } => Literal::BigInt(n),
+            Token::Float { float_value } => Literal::Float(float_value),
+            _ => Literal::Int(-1), // cannot happen
+        })
     }
 
     pub fn next_token_internal(&mut self) -> anyhow::Result<()> {
@@ -210,7 +228,8 @@ impl<'a> Scanner<'a> {
                                 }
                                 if col != *self.indentstk.last().unwrap() {
                                     return Err(anyhow!(
-                                        "{:?} unindent does not match any outer indentation level",
+                                        "{}{:?} unindent does not match any outer indentation level",
+                                        self.path.to_string_lossy(),
                                         self.pos
                                     ));
                                 }
@@ -263,15 +282,15 @@ impl<'a> Scanner<'a> {
                     if self.keep_comments {
                         self.mark_end_token();
                         if blank {
-                            self.line_comments.push(Comment {
+                            self.line_comments.push(self.bump.alloc(Comment {
                                 start: comment_pos,
-                                text: self.token_buf.raw.clone(),
-                            })
+                                text: self.bump.alloc_str(self.token),
+                            }))
                         } else {
-                            self.suffix_comments.push(Comment {
+                            self.suffix_comments.push(self.bump.alloc(Comment {
                                 start: comment_pos,
-                                text: self.token_buf.raw.clone(),
-                            })
+                                text: self.bump.alloc_str(self.token),
+                            }))
                         }
                     }
                 }
@@ -297,7 +316,7 @@ impl<'a> Scanner<'a> {
                     self.read();
                     self.token_buf.kind = Token::Newline;
                     self.token_buf.pos = newline_pos;
-                    self.token_buf.raw = "\n".to_string();
+                    self.token = "\n";
                     return Ok(());
                 }
 
@@ -314,7 +333,7 @@ impl<'a> Scanner<'a> {
                             self.line_start = true;
                             self.mark_start_token();
                             self.token_buf.kind = Token::Newline;
-                            self.token_buf.raw = "\n".to_string();
+                            self.token = "\n";
                             return Ok(());
                         }
                     }
@@ -329,7 +348,11 @@ impl<'a> Scanner<'a> {
                 if c == '\\' {
                     self.read();
                     if self.peek() != '\n' {
-                        return Err(anyhow!("{} stray backslash in program", self.pos));
+                        return Err(anyhow!(
+                            "{}{} stray backslash in program",
+                            self.path.to_string_lossy(),
+                            self.pos
+                        ));
                     }
                     self.read();
                     break 'start;
@@ -385,7 +408,7 @@ impl<'a> Scanner<'a> {
                         c = self.peek()
                     }
                     self.mark_end_token();
-                    match KEYWORD_TOKEN.get(self.token_buf.raw.as_str()) {
+                    match keyword(self.token) {
                         Some(k) => self.token_buf.kind = k.clone(),
                         _ => {
                             self.token_buf.kind = Token::Ident {
@@ -421,7 +444,12 @@ impl<'a> Scanner<'a> {
                     }
                     ']' | ')' | '}' => {
                         if self.depth == 0 {
-                            return Err(anyhow!("{} unexpected '{}'", self.pos, c));
+                            return Err(anyhow!(
+                                "{}:{} unexpected '{}'",
+                                self.path.to_string_lossy(),
+                                self.pos,
+                                c
+                            ));
                         } else {
                             self.depth -= 1
                         }
@@ -556,7 +584,13 @@ impl<'a> Scanner<'a> {
                                 self.mark_end_token();
                                 return Ok(());
                             }
-                            '!' => return Err(anyhow!("{} unexpected input character '!'", start)),
+                            '!' => {
+                                return Err(anyhow!(
+                                    "{}{} unexpected input character '!'",
+                                    self.path.to_string_lossy(),
+                                    start
+                                ))
+                            }
                             '+' => {
                                 self.token_buf.kind = Token::Plus;
                                 self.mark_end_token();
@@ -648,7 +682,14 @@ impl<'a> Scanner<'a> {
                             }
                         }
                     }
-                    _ => return Err(anyhow!("{} unexpected input character {}", self.pos, c)),
+                    _ => {
+                        return Err(anyhow!(
+                            "{}:{} unexpected input character {}",
+                            self.path.to_string_lossy(),
+                            self.pos,
+                            c
+                        ))
+                    }
                 }
             }
         }
@@ -674,7 +715,11 @@ impl<'a> Scanner<'a> {
             // single-quoted string literal
             loop {
                 if self.rest.is_empty() {
-                    return Err(anyhow!("{:?} unexpected eof in string", self.pos));
+                    return Err(anyhow!(
+                        "{}:{:?} unexpected eof in string",
+                        self.path.to_string_lossy(),
+                        self.pos
+                    ));
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -682,11 +727,19 @@ impl<'a> Scanner<'a> {
                     break;
                 }
                 if c == '\n' {
-                    return Err(anyhow!("{:?} unexpected newline in string", self.pos));
+                    return Err(anyhow!(
+                        "{}:{:?} unexpected newline in string",
+                        self.path.to_string_lossy(),
+                        self.pos
+                    ));
                 }
                 if c == '\\' {
                     if self.rest.is_empty() {
-                        return Err(anyhow!("{:?} unexpected eof in string", self.pos));
+                        return Err(anyhow!(
+                            "{}:{:?} unexpected eof in string",
+                            self.path.to_string_lossy(),
+                            self.pos
+                        ));
                     }
                     c = self.read();
                     raw.push(c)
@@ -702,7 +755,11 @@ impl<'a> Scanner<'a> {
             let mut quote_count = 0;
             loop {
                 if self.rest.is_empty() {
-                    return Err(anyhow!("{:?} unexpected eof in string", self.pos));
+                    return Err(anyhow!(
+                        "{}:{:?} unexpected eof in string",
+                        self.path.to_string_lossy(),
+                        self.pos
+                    ));
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -724,7 +781,7 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        self.token_buf.raw = raw.to_string();
+        self.token = "<literal>";
         match crate::quote::unquote(&raw) {
             Ok(crate::quote::DecodedSequence::String(decoded)) => {
                 self.token_buf.kind = Token::String { decoded }
@@ -732,7 +789,14 @@ impl<'a> Scanner<'a> {
             Ok(crate::quote::DecodedSequence::Bytes(decoded)) => {
                 self.token_buf.kind = Token::Bytes { decoded }
             }
-            Err(e) => return Err(anyhow!("error unquoting: {}", e)),
+            Err(e) => {
+                return Err(anyhow!(
+                    "{}:{} error unquoting: {}",
+                    self.path.to_string_lossy(),
+                    self.pos,
+                    e
+                ))
+            }
         }
         Ok(())
     }
@@ -821,9 +885,9 @@ impl<'a> Scanner<'a> {
                 } else if octal && !allzeros {
                     self.mark_end_token();
                     return Err(anyhow!(
-                        "{} obsolete form of octal literal; use 0o{}",
+                        "{}:{} obsolete form of octal literal; use 0o...",
+                        self.path.to_string_lossy(),
                         self.pos,
-                        &self.token_buf.raw[1..]
                     ));
                 }
             }
@@ -861,7 +925,11 @@ impl<'a> Scanner<'a> {
                 self.read();
                 c = self.peek();
                 if !c.is_ascii_digit() {
-                    return Err(anyhow!("{} invalid float literal", start));
+                    return Err(anyhow!(
+                        "{}:{} invalid float literal",
+                        self.path.to_string_lossy(),
+                        start
+                    ));
                 }
             }
             while c.is_ascii_digit() {
@@ -901,9 +969,12 @@ impl<'a> Scanner<'a> {
                         return Ok(());
                     }
                     _ => {
-                        let bigint_value =
-                            num_bigint::BigInt::parse_bytes(s[2..].as_bytes(), 16)
-                                .ok_or(anyhow!("{} could not parse hex big int", start))?;
+                        let bigint_value = num_bigint::BigInt::parse_bytes(s[2..].as_bytes(), 16)
+                            .ok_or(anyhow!(
+                            "{}:{} could not parse hex big int",
+                            self.path.to_string_lossy(),
+                            start
+                        ))?;
                         self.token_buf.kind = Token::Int {
                             decoded: IntValue::BigInt(bigint_value),
                         };
@@ -921,8 +992,12 @@ impl<'a> Scanner<'a> {
                 };
             }
             _ => {
-                let bigint_value = num_bigint::BigInt::parse_bytes(s.as_bytes(), 10)
-                    .ok_or(anyhow!("{} could not parse big int", start))?;
+                let bigint_value =
+                    num_bigint::BigInt::parse_bytes(s.as_bytes(), 10).ok_or(anyhow!(
+                        "{}:{} could not parse big int",
+                        self.path.to_string_lossy(),
+                        start
+                    ))?;
                 self.token_buf.kind = Token::Int {
                     decoded: IntValue::BigInt(bigint_value),
                 };
@@ -951,7 +1026,8 @@ mod tests {
         use Token::*;
         let expected: Vec<Token> = vec![LBrace, LParen, LBrack, RBrack, RParen, RBrace, Eof];
         let mut tokens: Vec<Token> = vec![];
-        let mut sc = Scanner::new(&"test", "{ ( [ ] ) }", false)?;
+        let bump = Bump::new();
+        let mut sc = Scanner::new(&bump, &"test", "{ ( [ ] ) }", false)?;
         while sc.token_buf.kind != Token::Eof {
             tokens.push(sc.next_token()?.kind)
         }
@@ -1045,7 +1121,8 @@ pass", "pass newline pass eof"), // consecutive newlines are consolidated
             ];
         for (input, want) in test_cases {
             let mut tokens = "".to_string();
-            let sc = Scanner::new(&"test", input, false);
+            let bump = Bump::new();
+            let sc = Scanner::new(&bump, &"test", input, false);
             assert!(sc.is_ok());
             let mut sc = sc.expect("...");
             while sc.token_buf.kind != Token::Eof {

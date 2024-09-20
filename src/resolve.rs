@@ -160,7 +160,7 @@ pub fn repl_chunk<'a>(
 // A use records an identifier and the environment in which it appears.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Use<'a> {
-    id: &'a Ident,
+    id: &'a Ident<'a>,
     env: usize,
 }
 
@@ -305,7 +305,7 @@ impl<'a> Resolver<'a> {
         let mut env = u.env;
         let mut b = self.blocks.borrow()[env];
         loop {
-            match b.bindings.borrow().get(u.id.name.as_str()) {
+            match b.bindings.borrow().get(u.id.name) {
                 Some(bind) => {
                     if bind.get_scope() == Scope::Free {
                         // shouldn't exist till later
@@ -353,7 +353,7 @@ impl<'a> Resolver<'a> {
 
         // Defined in this block?
         let b = self.blocks.borrow()[env];
-        match b.bindings.borrow().get(u.id.name.as_str()) {
+        match b.bindings.borrow().get(u.id.name) {
             Some(bind) => bind.clone(),
             None => {
                 let parent = b.parent;
@@ -390,7 +390,7 @@ impl<'a> Resolver<'a> {
 
                 // Memoize, to avoid duplicate free vars
                 // and redundant global (failing) lookups.
-                b.bind(u.id.name.as_str(), bind.clone());
+                b.bind(u.id.name, bind.clone());
                 if DEBUG {
                     println!("= {:?}\n", bind);
                 }
@@ -628,18 +628,16 @@ impl<'a> Resolver<'a> {
         /*file*/
         {
             let file = self.blocks.borrow()[0];
-            let (mut bind, ok) = match file.bindings.borrow_mut().get(id.name.as_str()) {
-                None => match self.globals.borrow_mut().get(id.name.as_str()) {
+            let (mut bind, ok) = match file.bindings.borrow_mut().get(id.name) {
+                None => match self.globals.borrow_mut().get(id.name) {
                     None => {
                         // first global binding of this name
                         let bind = Rc::new(Binding {
-                            first: id,
+                            first: id as *const Ident<'_> as _,
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
-                        self.globals
-                            .borrow_mut()
-                            .insert(id.name.as_str(), Rc::clone(&bind));
+                        self.globals.borrow_mut().insert(id.name, Rc::clone(&bind));
                         self.module_globals.borrow_mut().push(Rc::clone(&bind));
                         (bind, false)
                     }
@@ -648,17 +646,15 @@ impl<'a> Resolver<'a> {
                 Some(bind) => (bind.clone(), true),
             };
             if !ok {
-                match self.globals.borrow().get(id.name.as_str()) {
+                match self.globals.borrow().get(id.name) {
                     None => {
                         // first global binding of this name
                         bind = Rc::new(Binding {
-                            first: id,
+                            first: id as *const Ident<'_> as _,
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
-                        self.globals
-                            .borrow_mut()
-                            .insert(id.name.as_str(), Rc::clone(&bind));
+                        self.globals.borrow_mut().insert(id.name, Rc::clone(&bind));
                         self.module_globals.borrow_mut().push(Rc::clone(&bind));
                     }
                     _ => {}
@@ -679,23 +675,23 @@ impl<'a> Resolver<'a> {
         let b = self.blocks.borrow()[env];
         // Mark this name as local to current block.
         // Assign it a new local (positive) index in the current container.
-        let ok = b.bindings.borrow().contains_key(&id.name.as_str());
+        let ok = b.bindings.borrow().contains_key(&id.name);
         if !ok {
             if let Some(fnc) = &self.container(env).function {
                 let bind = Rc::new(Binding {
-                    first: id,
+                    first: id as *const Ident<'_> as _,
                     scope: RefCell::new(Scope::Local),
                     index: fnc.locals.borrow().len() as _,
                 });
-                b.bind(id.name.as_str(), Rc::clone(&bind));
+                b.bind(id.name, Rc::clone(&bind));
                 fnc.locals.borrow_mut().push(bind);
             } else {
                 let bind = Rc::new(Binding {
-                    first: id,
+                    first: id as *const Ident<'_> as _,
                     scope: RefCell::new(Scope::Local),
                     index: self.module_locals.borrow().len() as _,
                 });
-                b.bind(id.name.as_str(), Rc::clone(&bind));
+                b.bind(id.name, Rc::clone(&bind));
                 self.module_locals.borrow_mut().push(bind);
             }
         }
@@ -760,72 +756,63 @@ impl<'a> Resolver<'a> {
         };
         let id = u.id;
 
-        let bind: Rc<Binding> = if let Some(prev) = self.blocks.borrow()[0]
-            .bindings
-            .borrow()
-            .get(id.name.as_str())
-        {
-            // use of load-defined name in file block
-            Rc::clone(prev)
-        } else if let Some(prev) = self.globals.borrow().get(id.name.as_str()) {
-            // use of global declared by module
-            return prev.clone();
-        } else if is_global(id.name.as_str()) {
-            // use of global defined in a previous REPL chunk
-            let bind = Rc::new(Binding {
-                first: id, // wrong: this is not even a binding use
-                scope: RefCell::new(Scope::Global),
-                index: self.module_globals.borrow().len().try_into().unwrap(),
-            });
-            self.globals
-                .borrow_mut()
-                .insert(id.name.as_str(), bind.clone());
-            self.module_globals.borrow_mut().push(bind.clone());
-            bind
-        } else if let Some(prev) = self.predeclared.borrow().get(id.name.as_str()) {
-            // repeated use of predeclared or universal
-            prev.clone()
-        } else if (self.is_predeclared)(id.name.as_str()) {
-            // use of pre-declared name
-            let bind = Rc::new(Binding {
-                scope: RefCell::new(Scope::Predeclared),
-                index: 0,
-                first: std::ptr::null(),
-            });
-            self.predeclared
-                .borrow_mut()
-                .insert(id.name.as_str(), bind.clone()); // save it
-            bind
-        } else if (self.is_universal)(id.name.as_str()) {
-            // use of universal name
-            /*
-            if !self.options.Set && id.name == "set" {
-                //self.errorf(id.name_pos, doesnt+"support sets")
-                panic!("todo")
-            }
-             */
-            let bind = Rc::new(Binding {
-                scope: RefCell::new(Scope::Universal),
-                index: 0,
-                first: std::ptr::null(),
-            });
-            self.predeclared
-                .borrow_mut()
-                .insert(id.name.as_str(), bind.clone()); // save it
-            bind
-        } else {
-            let bind = self.bump.alloc(Binding {
-                scope: RefCell::new(Scope::Undefined),
-                index: 0,
-                first: std::ptr::null(),
-            });
-            //var hint string
-            //if n := self.spellcheck(use); n != "" {
-            //	hint = fmt.Sprintf(" (did you mean %s?)", n)
-            //}
-            // TODO self.errorf(id.NamePos, "undefined: %s%s", id.name, hint);
-            panic!("{} undefined: {}", id.name_pos, id.name);
-        };
+        let bind: Rc<Binding> =
+            if let Some(prev) = self.blocks.borrow()[0].bindings.borrow().get(id.name) {
+                // use of load-defined name in file block
+                Rc::clone(prev)
+            } else if let Some(prev) = self.globals.borrow().get(id.name) {
+                // use of global declared by module
+                return prev.clone();
+            } else if is_global(id.name) {
+                // use of global defined in a previous REPL chunk
+                let bind = Rc::new(Binding {
+                    first: id as *const Ident<'_> as _, // wrong: this is not even a binding use
+                    scope: RefCell::new(Scope::Global),
+                    index: self.module_globals.borrow().len().try_into().unwrap(),
+                });
+                self.globals.borrow_mut().insert(id.name, bind.clone());
+                self.module_globals.borrow_mut().push(bind.clone());
+                bind
+            } else if let Some(prev) = self.predeclared.borrow().get(id.name) {
+                // repeated use of predeclared or universal
+                prev.clone()
+            } else if (self.is_predeclared)(id.name) {
+                // use of pre-declared name
+                let bind = Rc::new(Binding {
+                    scope: RefCell::new(Scope::Predeclared),
+                    index: 0,
+                    first: std::ptr::null() as *const Ident<'_> as _,
+                });
+                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
+                bind
+            } else if (self.is_universal)(id.name) {
+                // use of universal name
+                /*
+                if !self.options.Set && id.name == "set" {
+                    //self.errorf(id.name_pos, doesnt+"support sets")
+                    panic!("todo")
+                }
+                 */
+                let bind = Rc::new(Binding {
+                    scope: RefCell::new(Scope::Universal),
+                    index: 0,
+                    first: std::ptr::null() as *const Ident<'_> as _,
+                });
+                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
+                bind
+            } else {
+                let bind = self.bump.alloc(Binding {
+                    scope: RefCell::new(Scope::Undefined),
+                    index: 0,
+                    first: std::ptr::null() as *const Ident<'_> as _,
+                });
+                //var hint string
+                //if n := self.spellcheck(use); n != "" {
+                //	hint = fmt.Sprintf(" (did you mean %s?)", n)
+                //}
+                // TODO self.errorf(id.NamePos, "undefined: %s%s", id.name, hint);
+                panic!("{} undefined: {}", id.name_pos, id.name);
+            };
         id.set_binding(&bind);
         return bind;
     }
@@ -1023,13 +1010,13 @@ impl<'a> Resolver<'a> {
                                     "keyword argument may not follow *args".to_string(),
                                 )
                             }
-                            if seen_name.contains(id.name.as_str()) {
+                            if seen_name.contains(id.name) {
                                 self.errorf(
                                     id.name_pos.clone(),
-                                    format!("keyword argument {} is repeated", id.name.as_str()),
+                                    format!("keyword argument {} is repeated", id.name),
                                 )
                             } else {
-                                seen_name.insert(id.name.as_str());
+                                seen_name.insert(id.name);
                             }
                             self.expr(env, y)
                         }
