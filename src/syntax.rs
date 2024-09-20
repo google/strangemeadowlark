@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt::Display, path::Path};
+use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
 use crate::{
+    binding::{Binding, Function},
     scan::{Comment, Position},
     token::Token,
 };
@@ -406,6 +407,9 @@ pub enum ExprData<'a> {
         // param = ident | ident=expr | * | *ident | **ident
         params: &'a [ExprRef<'a>],
         body: ExprRef<'a>,
+
+        // Filled in by resolver.
+        function: RefCell<*mut Function<'a>>,
     },
     ListExpr {
         lbrack: Position,
@@ -692,9 +696,20 @@ impl<'a> Display for ExprData<'a> {
 pub struct Ident {
     pub name_pos: Position,
     pub name: String,
+
+    // Filled in by resolver.
+    pub binding: RefCell<Option<Rc<Binding>>>,
 }
 
 impl Ident {
+    pub fn new(name_pos: Position, name: String) -> Self {
+        Ident {
+            name_pos,
+            name,
+            binding: RefCell::new(None),
+        }
+    }
+
     pub fn as_expr(&self) -> Expr {
         Expr {
             span: Span {
@@ -703,6 +718,17 @@ impl Ident {
             },
             data: ExprData::Ident(self),
         }
+    }
+
+    pub fn set_binding(&self, binding: &Rc<Binding>) {
+        let mut b = self.binding.borrow_mut();
+        *b = Some(binding.clone())
+    }
+
+    /// Retrieves the binding for this ident.
+    /// Panics if the binding is not set.
+    pub fn binding(&self) -> Option<Rc<Binding>> {
+        self.binding.borrow().clone()
     }
 }
 

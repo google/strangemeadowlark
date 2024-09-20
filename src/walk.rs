@@ -269,26 +269,17 @@ mod test {
             start: fake_pos.clone(),
             end: fake_pos.clone(),
         };
-        let foobar_ident = Ident {
-            name_pos: fake_pos.clone(),
-            name: "foobar".to_string(),
-        };
+        let foobar_ident = Ident::new(fake_pos.clone(), "foobar".to_string());
         let foobar = Expr {
             span: span.clone(),
             data: ExprData::Ident(&foobar_ident),
         };
-        let x_ident = Ident {
-            name_pos: fake_pos.clone(),
-            name: "x".to_string(),
-        };
+        let x_ident = Ident::new(fake_pos.clone(), "x".to_string());
         let x = Expr {
             span: span.clone(),
             data: ExprData::Ident(&x_ident),
         };
-        let y_ident = Ident {
-            name_pos: fake_pos.clone(),
-            name: "y".to_string(),
-        };
+        let y_ident = Ident::new(fake_pos.clone(), "y".to_string());
         let y = Expr {
             span: span.clone(),
             data: ExprData::Ident(&y_ident),
@@ -344,8 +335,8 @@ mod test {
                 Node::ExprRef(&three),
             ],
         }];
+        let bump = Bump::new();
         for test_case in test_cases {
-            let bump = Bump::new();
             let res = parse(&bump, &"path", test_case.input, Mode::Plain)?;
             let mut it = NodeIterator::new(Node::FileUnitRef(&res));
 

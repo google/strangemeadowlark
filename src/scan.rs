@@ -173,7 +173,7 @@ impl<'a> Scanner<'a> {
     }
 
     pub fn next_token_internal(&mut self) -> anyhow::Result<()> {
-        #[allow(clippy::never_loop)]  // clippy is wrong here.
+        #[allow(clippy::never_loop)] // clippy is wrong here.
         loop {
             self.token_buf.kind = Token::Illegal;
             'start: loop {

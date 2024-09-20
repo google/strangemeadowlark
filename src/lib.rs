@@ -13,15 +13,18 @@
 // limitations under the License.
 
 mod parse;
+mod print;
 mod quote;
 mod scan;
 mod syntax;
 mod token;
 mod walk;
-mod print;
+
+mod binding;
+mod resolve;
 
 pub use parse::{parse, parse_expr, Mode};
+pub use print::Printer;
 pub use syntax::*;
 pub use token::*;
 pub use walk::{Node, NodeIterator};
-pub use print::Printer;

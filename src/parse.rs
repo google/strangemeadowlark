@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use crate::scan::*;
@@ -385,23 +386,18 @@ impl<'a, 'b> Parser<'a, 'b> {
             if self.tok.kind == Token::RParen {
                 break; // allow trailing comma
             }
-            //let pos = self.pos.clone();
             match self.tok.kind.clone() {
                 Token::String { decoded } => {
                     // load("module", "id")
                     // To name is same as original.
-                    let lit = self.parse_primary()?; //.(*Literal)
-                    let id = self.bump.alloc(Ident {
-                        name_pos: lit.span.start.clone(),
-                        name: decoded,
-                    });
+                    self.next_token()?;
+                    let id = self.bump.alloc(Ident::new(self.tok.pos.clone(), decoded));
                     to.push(id);
                     from.push(id);
                 }
                 Token::Ident { name } => {
                     // load("module", to="from")
                     let id = self.parse_ident()?;
-                    //let name_pos = self.pos.clone();
                     to.push(id);
                     if self.tok.kind != Token::Eq {
                         return Err(anyhow!(
@@ -426,17 +422,13 @@ impl<'a, 'b> Parser<'a, 'b> {
                             token: Token::String { decoded },
                             token_pos,
                             ..
-                        } => from.push(self.bump.alloc(Ident {
-                            name_pos: token_pos.clone(),
-                            name: decoded.clone(),
-                        })),
+                        } => from.push(
+                            self.bump
+                                .alloc(Ident::new(token_pos.clone(), decoded.clone())),
+                        ),
                         _ => unreachable!(),
                     }
                 }
-                Token::RParen => {
-                    return Err(anyhow!("{} trailing comma in load statement", self.pos))
-                }
-
                 _ => {
                     return Err(anyhow!(
                         "{} load operand must be \"name\" or localname=\"name\" (got {})",
@@ -627,10 +619,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn parse_ident(&mut self) -> Result<&'b Ident> {
         match self.tok.kind.clone() {
             Token::Ident { name } => {
-                let id = self.bump.alloc(Ident {
-                    name_pos: self.tok.pos.clone(),
-                    name,
-                });
+                let id = self.bump.alloc(Ident::new(self.tok.pos.clone(), name));
                 self.next_token()?;
                 Ok(id)
             }
@@ -1055,6 +1044,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 lambda_pos,
                 params,
                 body,
+                function: RefCell::new(std::ptr::null_mut()),
             },
         });
         Ok(lambda_expr)

@@ -52,7 +52,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         for comment in &self.unit.suffix_comments {
             if comment.start.line == current.start.line {
                 write!(self.writer, " {}", comment.text)?;
-                break
+                break;
             }
         }
         self.print_newline(current)
@@ -93,12 +93,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         self.print_line_comments(&stmt.span)?;
         self.print_indent()?;
         match &stmt.data {
-            crate::StmtData::AssignStmt {
-                op,
-                lhs,
-                rhs,
-                ..
-            } => {
+            crate::StmtData::AssignStmt { op, lhs, rhs, .. } => {
                 self.print_expr(lhs)?;
                 write!(self.writer, " {} ", op)?;
                 self.print_expr(rhs)?;
@@ -107,10 +102,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 write!(self.writer, "{}", token)?;
             }
             crate::StmtData::DefStmt {
-                name,                
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 write!(self.writer, "def {}(", name.name)?;
                 self.print_comma_separated(params.iter())?;
@@ -204,7 +196,10 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 }
                 write!(self.writer, ")")?;
             }
-            crate::StmtData::ReturnStmt { return_pos: _, result } => {
+            crate::StmtData::ReturnStmt {
+                return_pos: _,
+                result,
+            } => {
                 write!(self.writer, "return")?;
                 match result {
                     Some(res) => {
@@ -253,11 +248,11 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 
     pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         match &expr.data {
-            crate::ExprData::BinaryExpr { x, op, y , ..} => {
+            crate::ExprData::BinaryExpr { x, op, y, .. } => {
                 self.print_expr(x)?;
                 write!(self.writer, " {} ", op)?;
                 self.print_expr(y)?;
-            },
+            }
             crate::ExprData::CallExpr { func, args, .. } => {
                 write!(self.writer, "{}(", func.data)?;
                 self.print_comma_separated(args.iter())?;
@@ -288,11 +283,15 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 write!(self.writer, " else ")?;
                 self.print_expr(else_arm)?;
             }
-            crate::ExprData::DictEntry { key, colon: _, value } => {
+            crate::ExprData::DictEntry {
+                key,
+                colon: _,
+                value,
+            } => {
                 self.print_expr(key)?;
                 write!(self.writer, ": ")?;
-                self.print_expr(value)?;                
-            },
+                self.print_expr(value)?;
+            }
             crate::ExprData::DictExpr { list, .. } => {
                 write!(self.writer, "{{")?;
                 self.print_comma_separated(list.iter())?;
