@@ -1,6 +1,6 @@
 [package]
 name = "strangemeadowlark"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 keywords = ["starlark"]
@@ -13,4 +13,3 @@ anyhow = "1.0"
 num-bigint = "0.4"
 unicode_categories = "0.1"
 bumpalo = "3.14"
-lazy_static = "1.4.0"

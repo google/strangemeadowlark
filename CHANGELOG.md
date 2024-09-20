@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2] - 2024-09-20
+
+### 🐛 Bug Fixes
+
+- Fix memory leaks
+
 ## [0.1.4] - 2024-06-19
 
 ### 🚀 Features
