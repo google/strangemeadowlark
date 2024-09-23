@@ -1336,7 +1336,7 @@ mod tests {
         if let Some(id) = b.first {
             assert_eq!(id.name, "f");
         } else {
-            panic!("first is 0");
+            panic!("first is None");
         }
         let b = &f.module.globals[1];
         assert_eq!(b.get_scope(), Scope::Global);
@@ -1344,7 +1344,7 @@ mod tests {
         if let Some(id) = b.first {
             assert_eq!(id.name, "a");
         } else {
-            panic!("first is 0");
+            panic!("first is None");
         }
         Ok(())
     }
