@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::scan::Position;
 use crate::syntax::{Expr, Stmt};
+use crate::Ident;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Scope {
@@ -32,10 +33,20 @@ pub struct Binding {
 
 impl Binding {
     pub fn get_scope(&self) -> Scope {
-        self.scope.borrow().clone()
+        *self.scope.borrow()
     }
     pub fn set_scope(&self, scope: Scope) {
         *self.scope.borrow_mut() = scope
+    }
+
+    pub fn get_first<'a>(&'a self) -> Option<&'a Ident> {
+        if self.first == 0 {
+            return None;
+        }
+        // SAFETY: This binding is part of a structure produced
+        // by resolve_* and thus references Ident instances
+        // which have the same lifetime.
+        Some(unsafe { &*(self.first as *const Ident<'_>) as &'a Ident<'a> })
     }
 }
 

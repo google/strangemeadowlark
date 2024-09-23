@@ -147,13 +147,19 @@ pub fn repl_chunk<'a>(
     //if !self.errors.is_empty() {
     //	return self.errors
     //}
-    let module_locals = vec![];
-    let module_globals = vec![];
+    let mut module_locals = vec![];
+    for v in r.module_locals.borrow().iter() {
+        module_locals.push(v.clone())
+    }
+    let mut module_globals = vec![];
+    for v in r.module_globals.borrow().iter() {
+        module_globals.push(v.clone())
+    }
     Ok(bump.alloc(FileUnitWithModule {
         file_unit: file,
         module: Module {
-            locals: module_locals,   // self.module_locals.clone(),
-            globals: module_globals, //self.module_globals.clone(),
+            locals: module_locals,
+            globals: module_globals,
         },
     }))
 }
@@ -1258,6 +1264,16 @@ mod tests {
         let src = "a = 3";
         let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
         let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+
+        assert_eq!(f.module.globals.len(), 1);
+        let b = &f.module.globals[0];
+        assert_eq!(b.get_scope(), Scope::Global);
+        assert_eq!(b.index, 0);
+        if let Some(id) = b.get_first() {
+            assert_eq!(id.name, "a");
+        } else {
+            panic!("first is 0");
+        }
         Ok(())
     }
 }
