@@ -25,6 +25,7 @@ mod resolve;
 
 pub use parse::{parse, parse_expr, Mode};
 pub use print::Printer;
+pub use resolve::resolve_file;
 pub use syntax::*;
 pub use token::*;
 pub use walk::{Node, NodeIterator};
