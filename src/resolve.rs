@@ -83,7 +83,7 @@ use bumpalo::Bump;
 
 pub struct FileUnitWithModule<'a> {
     file_unit: &'a FileUnit<'a>,
-    module: Module,
+    module: Module<'a>,
 }
 
 const DEBUG: bool = false;
@@ -188,7 +188,7 @@ pub struct Block<'a> {
     // bindings maps a name to its binding.
     // A local binding has an index into its innermost enclosing container's locals array.
     // A free binding has an index into its innermost enclosing function's freevars array.
-    bindings: RefCell<HashMap<&'a str, Rc<Binding>>>,
+    bindings: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
 
     // children records the child blocks of the current one.
     children: RefCell<Vec<usize>>,
@@ -235,7 +235,7 @@ impl<'a> Block<'a> {
         }
     }
 
-    fn bind(&'a self, name: &'a str, bind: Rc<Binding>) {
+    fn bind(&'a self, name: &'a str, bind: Rc<Binding<'a>>) {
         self.bindings.borrow_mut().insert(name, bind.clone());
     }
 }
@@ -247,13 +247,13 @@ pub struct Resolver<'a> {
     // moduleLocals contains the local variables of the module
     // (due to load statements and comprehensions outside any function).
     // moduleGlobals contains the global variables of the module.
-    module_locals: RefCell<Vec<Rc<Binding>>>,
-    module_globals: RefCell<Vec<Rc<Binding>>>,
+    module_locals: RefCell<Vec<Rc<Binding<'a>>>>,
+    module_globals: RefCell<Vec<Rc<Binding<'a>>>>,
 
     // globals maps each global name in the module to its binding.
     // predeclared does the same for predeclared and universal names.
-    globals: RefCell<HashMap<&'a str, Rc<Binding>>>,
-    predeclared: RefCell<HashMap<&'a str, Rc<Binding>>>,
+    globals: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
+    predeclared: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
 
     // These predicates report whether a name is
     // pre-declared, either in this module or universally,
@@ -314,7 +314,7 @@ impl<'a> Resolver<'a> {
     }
 
     // lookupLocal looks up an identifier within its immediately enclosing function.
-    fn lookup_local<'b>(&self, u: &'b Use) -> Option<Rc<Binding>> {
+    fn lookup_local<'b>(&self, u: &'b Use) -> Option<Rc<Binding<'a>>> {
         let mut env = u.env;
         let mut b = self.blocks.borrow()[env];
         loop {
@@ -385,7 +385,7 @@ impl<'a> Resolver<'a> {
                         }
                         let index: u8 = function.push_free_var(&bind);
                         bind = Rc::new(Binding {
-                            first: bind.first.clone(),
+                            first: bind.first,
                             scope: RefCell::new(Scope::Free),
                             index,
                         });
@@ -465,7 +465,7 @@ impl<'a> Resolver<'a> {
                 params,
                 rparen,
                 body,
-                func,
+                function,
             } => {
                 self.bind(env, name);
                 let f = Function {
@@ -480,7 +480,7 @@ impl<'a> Resolver<'a> {
                     free_vars: RefCell::new(vec![]),
                 };
                 let f = self.function(env, f);
-                *func.borrow_mut() = Some(f);
+                *function.borrow_mut() = Some(f);
             }
             StmtData::ForStmt {
                 for_pos,
@@ -647,7 +647,7 @@ impl<'a> Resolver<'a> {
     // binding already exists, unless AllowGlobalReassign.
     // It sets id.Binding to the binding (whether old or new),
     // and returns whether a binding already existed.
-    fn bind(&'a self, env: usize, id: &'a Ident) -> bool {
+    fn bind(&'a self, env: usize, id: &'a Ident<'a>) -> bool {
         // Binding outside any local (comprehension/function) block?
         if env == 0
         /*file*/
@@ -658,7 +658,7 @@ impl<'a> Resolver<'a> {
                     Entry::Vacant(e) => {
                         // first global binding of this name
                         let bind = Rc::new(Binding {
-                            first: id as *const Ident<'_> as _,
+                            first: Some(id),
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
@@ -675,7 +675,7 @@ impl<'a> Resolver<'a> {
                     Entry::Vacant(e) => {
                         // first global binding of this name
                         bind = Rc::new(Binding {
-                            first: id as *const Ident<'_> as _,
+                            first: Some(id),
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
@@ -688,15 +688,17 @@ impl<'a> Resolver<'a> {
             if ok
             /* && !self.options.GlobalReassign */
             {
-                self.errorf(
-                    id.name_pos,
-                    format!(
-                        "cannot reassign {} {} declared at {:?}",
-                        bind.scope.borrow(),
-                        id.name,
-                        bind.get_first().unwrap()
-                    ),
-                )
+                if let Some(first) = bind.first {
+                    self.errorf(
+                        id.name_pos,
+                        format!(
+                            "cannot reassign {} {} declared at {:?}",
+                            bind.scope.borrow(),
+                            id.name,
+                            first
+                        ),
+                    )
+                }
             }
             *id.binding.borrow_mut() = Some(bind);
             return ok;
@@ -705,7 +707,7 @@ impl<'a> Resolver<'a> {
         return self.bind_local(env, &id);
     }
 
-    fn bind_local(&'a self, env: usize, id: &'a Ident) -> bool {
+    fn bind_local(&'a self, env: usize, id: &'a Ident<'a>) -> bool {
         let b = self.blocks.borrow()[env];
         // Mark this name as local to current block.
         // Assign it a new local (positive) index in the current container.
@@ -713,7 +715,7 @@ impl<'a> Resolver<'a> {
         if !ok {
             if let Some(fnc) = &self.container(env).function {
                 let bind = Rc::new(Binding {
-                    first: id as *const Ident<'_> as _,
+                    first: Some(id),
                     scope: RefCell::new(Scope::Local),
                     index: fnc.locals.borrow().len() as _,
                 });
@@ -721,7 +723,7 @@ impl<'a> Resolver<'a> {
                 fnc.locals.borrow_mut().push(bind);
             } else {
                 let bind = Rc::new(Binding {
-                    first: id as *const Ident<'_> as _,
+                    first: Some(id),
                     scope: RefCell::new(Scope::Local),
                     index: self.module_locals.borrow().len() as _,
                 });
@@ -734,7 +736,7 @@ impl<'a> Resolver<'a> {
         return ok;
     }
 
-    fn r#use(&'a self, env: usize, id: &'a Ident) {
+    fn r#use(&'a self, env: usize, id: &'a Ident<'a>) {
         let u = Use { id, env };
 
         // The spec says that if there is a global binding of a name
@@ -782,7 +784,7 @@ impl<'a> Resolver<'a> {
 
     // useToplevel resolves use.id as a reference to a name visible at top-level.
     // The use.env field captures the original environment for error reporting.
-    fn use_top_level(&self, u: Use<'a>) -> Rc<Binding> {
+    fn use_top_level(&self, u: Use<'a>) -> Rc<Binding<'a>> {
         let is_global = if let Some(is_global) = self.is_global {
             is_global
         } else {
@@ -800,7 +802,7 @@ impl<'a> Resolver<'a> {
             } else if is_global(id.name) {
                 // use of global defined in a previous REPL chunk
                 let bind = Rc::new(Binding {
-                    first: id as *const Ident<'_> as _, // wrong: this is not even a binding use
+                    first: Some(id), // wrong: this is not even a binding use
                     scope: RefCell::new(Scope::Global),
                     index: self.module_globals.borrow().len().try_into().unwrap(),
                 });
@@ -815,7 +817,7 @@ impl<'a> Resolver<'a> {
                 let bind = Rc::new(Binding {
                     scope: RefCell::new(Scope::Predeclared),
                     index: 0,
-                    first: std::ptr::null() as *const Ident<'_> as _,
+                    first: None,
                 });
                 self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
                 bind
@@ -830,7 +832,7 @@ impl<'a> Resolver<'a> {
                 let bind = Rc::new(Binding {
                     scope: RefCell::new(Scope::Universal),
                     index: 0,
-                    first: std::ptr::null() as *const Ident<'_> as _,
+                    first: None,
                 });
                 self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
                 bind
@@ -838,7 +840,7 @@ impl<'a> Resolver<'a> {
                 let bind = Rc::new(Binding {
                     scope: RefCell::new(Scope::Undefined),
                     index: 0,
-                    first: std::ptr::null() as *const Ident<'_> as _,
+                    first: None,
                 });
                 //var hint string
                 //if n := self.spellcheck(use); n != "" {
@@ -1296,7 +1298,7 @@ mod tests {
         let b = &f.module.globals[0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
-        if let Some(id) = b.get_first() {
+        if let Some(id) = b.first {
             assert_eq!(id.name, "a");
         } else {
             panic!("first is 0");
@@ -1331,7 +1333,7 @@ mod tests {
         let b = &f.module.globals[0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
-        if let Some(id) = b.get_first() {
+        if let Some(id) = b.first {
             assert_eq!(id.name, "f");
         } else {
             panic!("first is 0");
@@ -1339,7 +1341,7 @@ mod tests {
         let b = &f.module.globals[1];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 1);
-        if let Some(id) = b.get_first() {
+        if let Some(id) = b.first {
             assert_eq!(id.name, "a");
         } else {
             panic!("first is 0");

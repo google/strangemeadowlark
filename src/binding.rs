@@ -23,7 +23,7 @@ impl std::fmt::Display for Scope {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Binding {
+pub struct Binding<'a> {
     pub scope: RefCell<Scope>,
 
     // Index records the index into the enclosing
@@ -34,34 +34,24 @@ pub struct Binding {
     pub index: u8,
 
     // first binding use (iff Scope==Local/Free/Global)
-    pub first: usize, /*const Ident<'_>*/
+    pub first: Option<&'a Ident<'a>>,
 }
 
-impl Binding {
+impl<'a> Binding<'a> {
     pub fn get_scope(&self) -> Scope {
         *self.scope.borrow()
     }
     pub fn set_scope(&self, scope: Scope) {
         *self.scope.borrow_mut() = scope
     }
-
-    pub fn get_first<'a>(&'a self) -> Option<&'a Ident> {
-        if self.first == 0 {
-            return None;
-        }
-        // SAFETY: This binding is part of a structure produced
-        // by resolve_* and thus references Ident instances
-        // which have the same lifetime.
-        Some(unsafe { &*(self.first as *const Ident<'_>) as &'a Ident<'a> })
-    }
 }
 
 // A Module contains resolver information about a file.
 // The resolver populates the Module field of each syntax.File.
 #[derive(Debug, PartialEq)]
-pub struct Module {
-    pub locals: Vec<Rc<Binding>>, // the file's (comprehension-)local variables
-    pub globals: Vec<Rc<Binding>>, // the file's global variables
+pub struct Module<'a> {
+    pub locals: Vec<Rc<Binding<'a>>>, // the file's (comprehension-)local variables
+    pub globals: Vec<Rc<Binding<'a>>>, // the file's global variables
 }
 
 #[derive(Debug, PartialEq)]
@@ -76,12 +66,12 @@ pub struct Function<'a> {
     pub has_varargs: RefCell<bool>, // whether params includes *args (convenience)
     pub has_kwargs: RefCell<bool>,  // whether params includes **kwargs (convenience)
     pub num_kwonly_params: RefCell<u8>, // number of keyword-only optional parameters
-    pub locals: RefCell<Vec<Rc<Binding>>>, // this function's local/cell variables, parameters first
-    pub free_vars: RefCell<Vec<Rc<Binding>>>, // enclosing cells to capture in closure
+    pub locals: RefCell<Vec<Rc<Binding<'a>>>>, // this function's local/cell variables, parameters first
+    pub free_vars: RefCell<Vec<Rc<Binding<'a>>>>, // enclosing cells to capture in closure
 }
 
 impl<'a> Function<'a> {
-    pub fn push_free_var(&self, v: &Rc<Binding>) -> u8 {
+    pub fn push_free_var(&self, v: &Rc<Binding<'a>>) -> u8 {
         let mut vs = self.free_vars.borrow_mut();
         let index: u8 = vs.len().try_into().unwrap();
         vs.push(v.clone());

@@ -701,13 +701,22 @@ impl<'a> PartialEq for Literal<'a> {
 
 impl<'a> Eq for Literal<'a> {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ident<'a> {
     pub name_pos: Position,
     pub name: &'a str,
 
     // Filled in by resolver.
-    pub binding: RefCell<Option<Rc<Binding>>>,
+    pub binding: RefCell<Option<Rc<Binding<'a>>>>,
+}
+
+impl<'a> std::fmt::Debug for Ident<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ident")
+            .field("name_pos", &self.name_pos)
+            .field("name", &self.name)
+            .finish()
+    }
 }
 
 impl<'a> Ident<'a> {
@@ -719,7 +728,7 @@ impl<'a> Ident<'a> {
         }
     }
 
-    pub fn as_expr(&self) -> Expr {
+    pub fn as_expr(&'a self) -> Expr<'a> {
         Expr {
             span: Span {
                 start: self.name_pos,
@@ -729,14 +738,14 @@ impl<'a> Ident<'a> {
         }
     }
 
-    pub fn set_binding(&self, binding: &Rc<Binding>) {
+    pub fn set_binding(&self, binding: &Rc<Binding<'a>>) {
         let mut b = self.binding.borrow_mut();
         *b = Some(binding.clone())
     }
 
     /// Retrieves the binding for this ident.
     /// Panics if the binding is not set.
-    pub fn binding(&self) -> Option<Rc<Binding>> {
+    pub fn binding(&self) -> Option<Rc<Binding<'a>>> {
         self.binding.borrow().clone()
     }
 }
