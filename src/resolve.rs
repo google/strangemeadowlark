@@ -90,9 +90,16 @@ const DEBUG: bool = false;
 const DOESNT: &str = "this Starlark dialect does not ";
 
 // An Error describes the nature and position of a resolver error.
+#[derive(Debug)]
 struct Error {
     pos: Position,
     msg: String,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.pos, self.msg)
+    }
 }
 
 // File resolves the specified file and records information about the
@@ -143,10 +150,9 @@ pub fn repl_chunk<'a>(
     // Function bodies may contain forward references to later global declarations.
     r.resolve_non_local_uses(0 /* env */);
 
-    // TODO
-    //if !self.errors.is_empty() {
-    //	return self.errors
-    //}
+    if !r.errors.borrow().is_empty() {
+        return Err(anyhow!("errors: {:?}", r.errors.borrow()));
+    }
     let mut module_locals = vec![];
     for v in r.module_locals.borrow().iter() {
         module_locals.push(v.clone())
@@ -653,24 +659,33 @@ impl<'a> Resolver<'a> {
                 Some(bind) => (bind.clone(), true),
             };
             if !ok {
-                match self.globals.borrow().get(id.name) {
-                    None => {
+                match self.globals.borrow_mut().entry(id.name) {
+                    Entry::Vacant(e) => {
                         // first global binding of this name
                         bind = Rc::new(Binding {
                             first: id as *const Ident<'_> as _,
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
-                        self.globals.borrow_mut().insert(id.name, Rc::clone(&bind));
+                        e.insert(Rc::clone(&bind));
                         self.module_globals.borrow_mut().push(Rc::clone(&bind));
                     }
                     _ => {}
                 }
             }
-            //if ok && !self.options.GlobalReassign {
-            //    self.errorf(id.name_pos, "cannot reassign %s %s declared at %s",
-            //        bind.scope, id.name, bind.first.name_pos)
-            //}
+            if ok
+            /* && !self.options.GlobalReassign */
+            {
+                self.errorf(
+                    id.name_pos,
+                    format!(
+                        "cannot reassign {} {} declared at {:?}",
+                        bind.scope.borrow(),
+                        id.name,
+                        bind.get_first().unwrap()
+                    ),
+                )
+            }
             *id.binding.borrow_mut() = Some(bind);
             return ok;
         }
@@ -1259,7 +1274,7 @@ mod tests {
     use crate::{parse, FileUnit, Mode};
 
     #[test]
-    fn basic_file() -> Result<()> {
+    fn basic_file_global() -> Result<()> {
         let bump = Bump::new();
         let src = "a = 3";
         let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
@@ -1275,5 +1290,21 @@ mod tests {
             panic!("first is 0");
         }
         Ok(())
+    }
+
+    #[test]
+    fn basic_file_global_error() -> Result<()> {
+        let bump = Bump::new();
+        let src = "a = 3\na = 4";
+        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
+        let f = resolve_file(file_unit, &bump, |s| false, |s| false);
+        if let Err(e) = f {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "expected error due to global reassign {:?}.",
+                f.unwrap().file_unit
+            ))
+        }
     }
 }

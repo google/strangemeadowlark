@@ -16,6 +16,12 @@ pub enum Scope {
     Universal,   // name is universal (e.g. len)
 }
 
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Binding {
     pub scope: RefCell<Scope>,
