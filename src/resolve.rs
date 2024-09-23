@@ -1396,13 +1396,13 @@ mod tests {
     }
 
     #[test]
-    fn load_local() -> Result<()> {
+    fn load_comprehension_local() -> Result<()> {
         let bump = Bump::new();
-        let src = "load('foo.sl', 'bar', baz='bak')";
+        let src = "load('foo.sl', 'bar', baz='bak')\n[x for x in baz if bar]";
         let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
         let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
 
-        assert_eq!(f.module.locals.len(), 2);
+        assert_eq!(f.module.locals.len(), 3);
         let b = &f.module.locals[0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 0);
@@ -1416,6 +1416,14 @@ mod tests {
         assert_eq!(b.index, 1);
         if let Some(id) = b.first {
             assert_eq!(id.name, "baz");
+        } else {
+            panic!("first is None");
+        }
+        let b = &f.module.locals[2];
+        assert_eq!(b.get_scope(), Scope::Local);
+        assert_eq!(b.index, 2);
+        if let Some(id) = b.first {
+            assert_eq!(id.name, "x");
         } else {
             panic!("first is None");
         }
