@@ -1394,4 +1394,31 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn load_local() -> Result<()> {
+        let bump = Bump::new();
+        let src = "load('foo.sl', 'bar', baz='bak')";
+        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
+        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+
+        assert_eq!(f.module.locals.len(), 2);
+        let b = &f.module.locals[0];
+        assert_eq!(b.get_scope(), Scope::Local);
+        assert_eq!(b.index, 0);
+        if let Some(id) = b.first {
+            assert_eq!(id.name, "bar");
+        } else {
+            panic!("first is None");
+        }
+        let b = &f.module.locals[1];
+        assert_eq!(b.get_scope(), Scope::Local);
+        assert_eq!(b.index, 1);
+        if let Some(id) = b.first {
+            assert_eq!(id.name, "baz");
+        } else {
+            panic!("first is None");
+        }
+        Ok(())
+    }
 }
