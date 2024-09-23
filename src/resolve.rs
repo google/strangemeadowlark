@@ -89,6 +89,8 @@ pub struct FileUnitWithModule<'a> {
 const DEBUG: bool = false;
 const DOESNT: &str = "this Starlark dialect does not ";
 
+const FILE_BLOCK: usize = 0;
+
 // An Error describes the nature and position of a resolver error.
 #[derive(Debug)]
 struct Error {
@@ -142,13 +144,13 @@ pub fn repl_chunk<'a>(
         is_predeclared,
         is_universal,
     ));
-    r.stmts(0 /* file */, file.stmts);
+    r.stmts(FILE_BLOCK, file.stmts);
     r.resolve_local_uses(file_block);
 
     // At the end of the module, resolve all non-local variable references,
     // computing closures.
     // Function bodies may contain forward references to later global declarations.
-    r.resolve_non_local_uses(0 /* env */);
+    r.resolve_non_local_uses(FILE_BLOCK);
 
     if !r.errors.borrow().is_empty() {
         return Err(anyhow!("errors: {:?}", r.errors.borrow()));
@@ -294,10 +296,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    //fn file(&'a self) -> &'a Block<'a> {
-    //    &self.blocks[0]
-    //}
-
     // resolveLocalUses is called when leaving a container (function/module)
     // block.  It resolves all uses of locals/cells within that block.
     fn resolve_local_uses(&'a self, b: &'a Block<'a>) {
@@ -336,7 +334,7 @@ impl<'a> Resolver<'a> {
                 break;
             }
 
-            if b.parent != 0 {
+            if b.parent != FILE_BLOCK {
                 env = b.parent;
                 b = self.blocks.borrow()[env];
             } else {
@@ -353,10 +351,7 @@ impl<'a> Resolver<'a> {
             println!("lookupLexical {} in {:?} = ...", u.id.name, env);
         }
 
-        // Is this the file block?
-        if env == 0
-        /*file*/
-        {
+        if env == FILE_BLOCK {
             let bind = self.use_top_level(u); // file-local, global, predeclared, or not found
             if DEBUG {
                 println!("= {:?}\n", bind);
@@ -648,7 +643,7 @@ impl<'a> Resolver<'a> {
     fn container(&'a self, mut env: usize) -> &'a Block<'a> {
         let mut b = &self.blocks.borrow()[env];
         loop {
-            if b.function.is_some() || env == 0
+            if b.function.is_some() || env == FILE_BLOCK
             /* file */
             {
                 return b;
@@ -695,9 +690,7 @@ impl<'a> Resolver<'a> {
     // and returns whether a binding already existed.
     fn bind(&'a self, env: usize, id: &'a Ident<'a>) -> bool {
         // Binding outside any local (comprehension/function) block?
-        if env == 0
-        /*file*/
-        {
+        if env == FILE_BLOCK {
             let file = self.blocks.borrow()[0];
             let (mut bind, ok) = match file.bindings.borrow_mut().get(id.name) {
                 None => match self.globals.borrow_mut().entry(id.name) {
@@ -731,9 +724,8 @@ impl<'a> Resolver<'a> {
                     _ => {}
                 }
             }
-            if ok
-            /* && !self.options.GlobalReassign */
-            {
+            // Assuming !self.options.GlobalReassign
+            if ok {
                 if let Some(first) = bind.first {
                     self.errorf(
                         id.name_pos,
@@ -784,52 +776,19 @@ impl<'a> Resolver<'a> {
 
     fn r#use(&'a self, env: usize, id: &'a Ident<'a>) {
         let u = Use { id, env };
-
-        // The spec says that if there is a global binding of a name
-        // then all references to that name in that block refer to the
-        // global, even if the use precedes the def---just as for locals.
-        // For example, in this code,
-        //
-        //   print(len); len=1; print(len)
-        //
-        // both occurrences of len refer to the len=1 binding, which
-        // completely shadows the predeclared len function.
-        //
-        // The rationale for these semantics, which differ from Python,
-        // is that the static meaning of len (a reference to a global)
-        // does not change depending on where it appears in the file.
-        // Of course, its dynamic meaning does change, from an error
-        // into a valid reference, so it's not clear these semantics
-        // have any practical advantage.
-        //
-        // In any case, the Bazel implementation lags behind the spec
-        // and follows Python behavior, so the first use of len refers
-        // to the predeclared function.  This typically used in a BUILD
-        // file that redefines a predeclared name half way through,
-        // for example:
-        //
-        //	proto_library(...) 			# built-in rule
-        //      load("myproto.bzl", "proto_library")
-        //	proto_library(...) 			# user-defined rule
-        //
-        // We will piggyback support for the legacy semantics on the
-        // AllowGlobalReassign flag, which is loosely related and also
-        // required for Bazel.
-        if
-        /* self.options.GlobalReassign && */
-        env == 0
-        /* file */
-        {
+        // Assuming !GlobalReassign
+        /* if self.options.GlobalReassign && ...
+        if env == FILE_BLOCK {
             self.use_top_level(u);
             return;
         }
-
+        */
         let b = self.container(env);
         b.uses.borrow_mut().push(u)
     }
 
-    // useToplevel resolves use.id as a reference to a name visible at top-level.
-    // The use.env field captures the original environment for error reporting.
+    // use_top_level resolves u.id as a reference to a name visible at top-level.
+    // The u.env field captures the original environment for error reporting.
     fn use_top_level(&self, u: Use<'a>) -> Rc<Binding<'a>> {
         let is_global = if let Some(is_global) = self.is_global {
             is_global
@@ -838,63 +797,66 @@ impl<'a> Resolver<'a> {
         };
         let id = u.id;
 
-        let bind: Rc<Binding> =
-            if let Some(prev) = self.blocks.borrow()[0].bindings.borrow().get(id.name) {
-                // use of load-defined name in file block
-                Rc::clone(prev)
-            } else if let Some(prev) = self.globals.borrow().get(id.name) {
-                // use of global declared by module
-                return prev.clone();
-            } else if is_global(id.name) {
-                // use of global defined in a previous REPL chunk
-                let bind = Rc::new(Binding {
-                    first: Some(id), // wrong: this is not even a binding use
-                    scope: RefCell::new(Scope::Global),
-                    index: self.module_globals.borrow().len().try_into().unwrap(),
-                });
-                self.globals.borrow_mut().insert(id.name, bind.clone());
-                self.module_globals.borrow_mut().push(bind.clone());
-                bind
-            } else if let Some(prev) = self.predeclared.borrow().get(id.name) {
-                // repeated use of predeclared or universal
-                prev.clone()
-            } else if (self.is_predeclared)(id.name) {
-                // use of pre-declared name
-                let bind = Rc::new(Binding {
-                    scope: RefCell::new(Scope::Predeclared),
-                    index: 0,
-                    first: None,
-                });
-                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
-                bind
-            } else if (self.is_universal)(id.name) {
-                // use of universal name
-                /*
-                if !self.options.Set && id.name == "set" {
-                    //self.errorf(id.name_pos, doesnt+"support sets")
-                    panic!("todo")
-                }
-                 */
-                let bind = Rc::new(Binding {
-                    scope: RefCell::new(Scope::Universal),
-                    index: 0,
-                    first: None,
-                });
-                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
-                bind
-            } else {
-                let bind = Rc::new(Binding {
-                    scope: RefCell::new(Scope::Undefined),
-                    index: 0,
-                    first: None,
-                });
-                //var hint string
-                //if n := self.spellcheck(use); n != "" {
-                //	hint = fmt.Sprintf(" (did you mean %s?)", n)
-                //}
-                self.errorf(id.name_pos, format!("undefined: {}", id.name /* , hint*/));
-                bind
-            };
+        let bind: Rc<Binding> = if let Some(prev) = self.blocks.borrow()[FILE_BLOCK]
+            .bindings
+            .borrow()
+            .get(id.name)
+        {
+            // use of load-defined name in file block
+            Rc::clone(prev)
+        } else if let Some(prev) = self.globals.borrow().get(id.name) {
+            // use of global declared by module
+            return prev.clone();
+        } else if is_global(id.name) {
+            // use of global defined in a previous REPL chunk
+            let bind = Rc::new(Binding {
+                first: Some(id), // wrong: this is not even a binding use
+                scope: RefCell::new(Scope::Global),
+                index: self.module_globals.borrow().len().try_into().unwrap(),
+            });
+            self.globals.borrow_mut().insert(id.name, bind.clone());
+            self.module_globals.borrow_mut().push(bind.clone());
+            bind
+        } else if let Some(prev) = self.predeclared.borrow().get(id.name) {
+            // repeated use of predeclared or universal
+            prev.clone()
+        } else if (self.is_predeclared)(id.name) {
+            // use of pre-declared name
+            let bind = Rc::new(Binding {
+                scope: RefCell::new(Scope::Predeclared),
+                index: 0,
+                first: None,
+            });
+            self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
+            bind
+        } else if (self.is_universal)(id.name) {
+            // use of universal name
+            /*
+            if !self.options.Set && id.name == "set" {
+                //self.errorf(id.name_pos, doesnt+"support sets")
+                panic!("todo")
+            }
+             */
+            let bind = Rc::new(Binding {
+                scope: RefCell::new(Scope::Universal),
+                index: 0,
+                first: None,
+            });
+            self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
+            bind
+        } else {
+            let bind = Rc::new(Binding {
+                scope: RefCell::new(Scope::Undefined),
+                index: 0,
+                first: None,
+            });
+            //var hint string
+            //if n := self.spellcheck(use); n != "" {
+            //	hint = fmt.Sprintf(" (did you mean %s?)", n)
+            //}
+            self.errorf(id.name_pos, format!("undefined: {}", id.name /* , hint*/));
+            bind
+        };
         id.set_binding(&bind);
         return bind;
     }
