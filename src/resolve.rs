@@ -487,20 +487,64 @@ impl<'a> Resolver<'a> {
                 vars,
                 x,
                 body,
-            } => todo!(),
+            } => {
+                // Assuming !option.TopLevelControl
+                if self.container(env).function.is_none() {
+                    self.errorf(*for_pos, "for loop not within a function".to_string());
+                }
+                self.expr(env, x);
+                let is_augmented = false;
+                self.assign(env, vars, is_augmented);
+                self.stmts(env, body);
+            }
             StmtData::WhileStmt {
                 while_pos,
                 cond,
                 body,
-            } => todo!(),
+            } => {
+                // Assuming option.While and !option.TopLevelControl
+                if self.container(env).function.is_none() {
+                    self.errorf(*while_pos, "while loop not within a function".to_string());
+                }
+                self.expr(env, cond);
+                self.stmts(env, body);
+            }
             StmtData::LoadStmt {
                 load_pos,
                 module,
                 from,
                 to,
                 rparen_pos,
-            } => todo!(),
-            StmtData::ReturnStmt { return_pos, result } => todo!(),
+            } => {
+                if self.container(env).function.is_some() {
+                    self.errorf(*load_pos, "load stmt within a function".to_string());
+                }
+                for (i, from) in from.iter().enumerate() {
+                    if from.name.is_empty() {
+                        self.errorf(from.name_pos, "load: empty identifier".to_string());
+                        continue;
+                    }
+                    if from.name.starts_with('_') {
+                        self.errorf(
+                            from.name_pos,
+                            "load: names with leading _ are not exported".to_string(),
+                        );
+                    }
+                    let id = to[i];
+                    // Assume !LoadBindsGlobally
+                    if self.bind_local(env, id) {
+                        self.errorf(
+                            id.name_pos,
+                            format!("cannot reassign top-level {}", id.name),
+                        );
+                    }
+                }
+            }
+            StmtData::ReturnStmt { return_pos, result } => {
+                if self.container(env).function.is_none() {
+                    self.errorf(*return_pos, "return stmt not within a function".to_string());
+                }
+            }
         }
     }
 
@@ -522,27 +566,29 @@ impl<'a> Resolver<'a> {
                 self.expr(env, x)
             }
 
-            ExprData::TupleExpr { .. } => {
+            ExprData::TupleExpr { list, .. } => {
                 // (x, y) = ...
                 if is_augmented {
-                    todo!("error");
-                    //self.errorf(syntax.Start(lhs), "can't use tuple expression in augmented assignment")
+                    self.errorf(
+                        lhs.span.start,
+                        "can't use tuple expression in augmented assignment".to_string(),
+                    )
                 }
-                todo!("implement")
-                //for _, elem := range lhs.List {
-                //    self.assign(elem, isAugmented)
-                //}
+                for elem in list.iter() {
+                    self.assign(env, elem, is_augmented)
+                }
             }
-            ExprData::ListExpr { .. } => {
+            ExprData::ListExpr { list, .. } => {
                 // [x, y, z] = ...
                 if is_augmented {
-                    todo!("error")
-                    //self.errorf(syntax.Start(lhs), "can't use list expression in augmented assignment")
+                    self.errorf(
+                        lhs.span.start,
+                        "can't use list expression in augmented assignment".to_string(),
+                    )
                 }
-                todo!("implement")
-                //for _, elem := range lhs.List {
-                //    self.assign(elem, isAugmented)
-                //}
+                for elem in list {
+                    self.assign(env, elem, is_augmented)
+                }
             }
             ExprData::ParenExpr { x, .. } => self.assign(env, x, is_augmented),
             _ => self.errorf(lhs.span.start, format!("can't assign to {}", lhs.data)),
