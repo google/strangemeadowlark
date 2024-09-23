@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -629,19 +630,19 @@ impl<'a> Resolver<'a> {
         {
             let file = self.blocks.borrow()[0];
             let (mut bind, ok) = match file.bindings.borrow_mut().get(id.name) {
-                None => match self.globals.borrow_mut().get(id.name) {
-                    None => {
+                None => match self.globals.borrow_mut().entry(id.name) {
+                    Entry::Vacant(e) => {
                         // first global binding of this name
                         let bind = Rc::new(Binding {
                             first: id as *const Ident<'_> as _,
                             scope: RefCell::new(Scope::Global),
                             index: self.module_globals.borrow().len() as _,
                         });
-                        self.globals.borrow_mut().insert(id.name, Rc::clone(&bind));
+                        e.insert(Rc::clone(&bind));
                         self.module_globals.borrow_mut().push(Rc::clone(&bind));
                         (bind, false)
                     }
-                    Some(bind) => (bind.clone(), true),
+                    Entry::Occupied(e) => (e.get().clone(), true),
                 },
                 Some(bind) => (bind.clone(), true),
             };
@@ -1244,3 +1245,19 @@ impl<'a> Resolver<'a> {
         }
     }
 } // impl
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{parse, FileUnit, Mode};
+
+    #[test]
+    fn basic_file() -> Result<()> {
+        let bump = Bump::new();
+        let src = "a = 3";
+        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
+        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+        Ok(())
+    }
+}
