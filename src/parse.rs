@@ -173,6 +173,7 @@ where {
                 params,
                 rparen,
                 body,
+                function: RefCell::new(None),
             },
         });
         Ok(stmt)
@@ -1041,7 +1042,7 @@ where {
                 lambda_pos,
                 params,
                 body,
-                function: RefCell::new(std::ptr::null_mut()),
+                function: RefCell::new(None),
             },
         });
         Ok(lambda_expr)

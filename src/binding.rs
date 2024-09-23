@@ -69,7 +69,7 @@ pub struct Module {
 // The resolver populates the Function field of each syntax.DefStmt and syntax.LambdaExpr.
 pub struct Function<'a> {
     pub pos: Position,              // of DEF or LAMBDA
-    pub name: String,               // name of def, or "lambda"
+    pub name: &'a str,              // name of def, or "lambda"
     pub params: &'a [&'a Expr<'a>], // param = ident | ident=expr | * | *ident | **ident
     pub body: &'a [&'a Stmt<'a>],   // contains synthetic 'return expr' for lambda
 

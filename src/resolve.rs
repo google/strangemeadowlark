@@ -465,7 +465,23 @@ impl<'a> Resolver<'a> {
                 params,
                 rparen,
                 body,
-            } => todo!(),
+                func,
+            } => {
+                self.bind(env, name);
+                let f = Function {
+                    pos: *def_pos,
+                    name: name.name,
+                    params,
+                    body,
+                    has_varargs: RefCell::new(false),
+                    has_kwargs: RefCell::new(false),
+                    num_kwonly_params: RefCell::new(0),
+                    locals: RefCell::new(vec![]),
+                    free_vars: RefCell::new(vec![]),
+                };
+                let f = self.function(env, f);
+                *func.borrow_mut() = Some(f);
+            }
             StmtData::ForStmt {
                 for_pos,
                 vars,
@@ -529,11 +545,7 @@ impl<'a> Resolver<'a> {
                 //}
             }
             ExprData::ParenExpr { x, .. } => self.assign(env, x, is_augmented),
-            _ => {
-                todo!("error")
-                //name := strings.ToLower(strings.TrimPrefix(fmt.Sprintf("%T", lhs), "*syntax."))
-                //self.errorf(syntax.Start(lhs), "can't assign to %s", name)
-            }
+            _ => self.errorf(lhs.span.start, format!("can't assign to {}", lhs.data)),
         }
     }
 
@@ -823,7 +835,7 @@ impl<'a> Resolver<'a> {
                 self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
                 bind
             } else {
-                let bind = self.bump.alloc(Binding {
+                let bind = Rc::new(Binding {
                     scope: RefCell::new(Scope::Undefined),
                     index: 0,
                     first: std::ptr::null() as *const Ident<'_> as _,
@@ -832,8 +844,8 @@ impl<'a> Resolver<'a> {
                 //if n := self.spellcheck(use); n != "" {
                 //	hint = fmt.Sprintf(" (did you mean %s?)", n)
                 //}
-                // TODO self.errorf(id.NamePos, "undefined: %s%s", id.name, hint);
-                panic!("{} undefined: {}", id.name_pos, id.name);
+                self.errorf(id.name_pos, format!("undefined: {}", id.name /* , hint*/));
+                bind
             };
         id.set_binding(&bind);
         return bind;
@@ -1087,7 +1099,7 @@ impl<'a> Resolver<'a> {
                 ..
             } => {
                 let mut func = Function {
-                    name: "lambda".to_string(),
+                    name: "lambda",
                     pos: e.span.start.clone(),
                     params: self.bump.alloc_slice_copy(params),
                     body: self.bump.alloc_slice_copy(&[&*self.bump.alloc(Stmt {
@@ -1103,8 +1115,7 @@ impl<'a> Resolver<'a> {
                     locals: RefCell::new(vec![]),
                     free_vars: RefCell::new(vec![]),
                 };
-                *function.borrow_mut() = &mut func;
-                self.function(env, func, e.span.start.clone())
+                *function.borrow_mut() = Some(self.function(env, func))
             }
             ExprData::ParenExpr { x, .. } => self.expr(env, x),
 
@@ -1112,7 +1123,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn function(&'a self, env: usize, mut function: Function<'a>, pos: Position) {
+    fn function(&'a self, env: usize, mut function: Function<'a>) -> &'a Function<'a> {
         // Resolve defaults in enclosing environment.
         for param in function.params.into_iter() {
             match param.data {
@@ -1245,17 +1256,18 @@ impl<'a> Resolver<'a> {
 
         // Resolve all uses of this function's local vars,
         // and keep just the remaining uses of free/global vars.
-        self.resolve_local_uses(b)
+        self.resolve_local_uses(b);
 
         // Leave function block.
         //self.pop()
 
         // References within the function body to globals are not
         // resolved until the end of the module.
+        function
     }
 
-    fn resolve_non_local_uses(&'a self, b: usize) {
-        let b = &self.blocks.borrow()[0];
+    fn resolve_non_local_uses(&'a self, env: usize) {
+        let b = &self.blocks.borrow()[env];
         // First resolve inner blocks.
         for child in b.children.borrow().iter() {
             self.resolve_non_local_uses(*child)
@@ -1306,5 +1318,32 @@ mod tests {
                 f.unwrap().file_unit
             ))
         }
+    }
+
+    #[test]
+    fn basic_file_local() -> Result<()> {
+        let bump = Bump::new();
+        let src = "def f(b):\n  a = b\na = 2";
+        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
+        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+
+        assert_eq!(f.module.globals.len(), 2);
+        let b = &f.module.globals[0];
+        assert_eq!(b.get_scope(), Scope::Global);
+        assert_eq!(b.index, 0);
+        if let Some(id) = b.get_first() {
+            assert_eq!(id.name, "f");
+        } else {
+            panic!("first is 0");
+        }
+        let b = &f.module.globals[1];
+        assert_eq!(b.get_scope(), Scope::Global);
+        assert_eq!(b.index, 1);
+        if let Some(id) = b.get_first() {
+            assert_eq!(id.name, "a");
+        } else {
+            panic!("first is 0");
+        }
+        Ok(())
     }
 }

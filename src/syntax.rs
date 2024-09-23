@@ -79,6 +79,7 @@ pub enum StmtData<'a> {
         params: &'a [ExprRef<'a>],
         rparen: Position,
         body: &'a [StmtRef<'a>],
+        function: RefCell<Option<&'a Function<'a>>>,
     },
     ExprStmt {
         x: ExprRef<'a>,
@@ -382,7 +383,7 @@ pub enum ExprData<'a> {
         body: ExprRef<'a>,
 
         // Filled in by resolver.
-        function: RefCell<*mut Function<'a>>,
+        function: RefCell<Option<&'a Function<'a>>>,
     },
     ListExpr {
         lbrack: Position,
