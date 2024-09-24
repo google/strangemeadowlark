@@ -2,7 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2] - 2024-09-20
+## [0.3.0] - 2024-09-24
+
+### 🚀 Features
+
+- Added resolver (which also does checks). This required some changes to exported types, hence bumping.
+
+## [0.2.0] - 2024-09-20
 
 ### 🐛 Bug Fixes
 
