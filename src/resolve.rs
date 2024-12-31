@@ -82,8 +82,8 @@ use bumpalo::Bump;
 // values to a variable at top-level. (These two roles should be separated.)
 
 pub struct FileUnitWithModule<'a> {
-    file_unit: &'a FileUnit<'a>,
-    module: Module<'a>,
+    pub file_unit: &'a FileUnit<'a>,
+    pub module: Module<'a>,
 }
 
 const DEBUG: bool = false;
@@ -346,7 +346,7 @@ impl<'a> Resolver<'a> {
 
     // lookup_lexical looks up an identifier use.id within its lexically enclosing environment.
     // The use.env field captures the original environment for error reporting.
-    fn lookup_lexical(&'a self, u: Use<'a>, env: usize) -> Rc<Binding> {
+    fn lookup_lexical(&'a self, u: Use<'a>, env: usize) -> Rc<Binding<'a>> {
         if DEBUG {
             println!("lookupLexical {} in {:?} = ...", u.id.name, env);
         }
@@ -361,7 +361,8 @@ impl<'a> Resolver<'a> {
 
         // Defined in this block?
         let b = self.blocks.borrow()[env];
-        match b.bindings.borrow().get(u.id.name) {
+        let mut memoize = false;
+        let bind = match b.bindings.borrow().get(u.id.name) {
             Some(bind) => bind.clone(),
             None => {
                 let parent = b.parent;
@@ -395,16 +396,19 @@ impl<'a> Resolver<'a> {
                     }
                     _ => {}
                 }
-
-                // Memoize, to avoid duplicate free vars
-                // and redundant global (failing) lookups.
-                b.bind(u.id.name, bind.clone());
-                if DEBUG {
-                    println!("= {:?}\n", bind);
-                }
+                memoize = true;
                 bind
             }
+        };
+        if memoize {
+            // Memoize, to avoid duplicate free vars
+            // and redundant global (failing) lookups.
+            b.bind(u.id.name, bind.clone());
+            if DEBUG {
+                println!("= {:?}\n", bind);
+            }
         }
+        bind
     }
 
     fn stmts(&'a self, env: usize, stmts: &'a [StmtRef<'a>]) {
@@ -538,6 +542,9 @@ impl<'a> Resolver<'a> {
             StmtData::ReturnStmt { return_pos, result } => {
                 if self.container(env).function.is_none() {
                     self.errorf(*return_pos, "return stmt not within a function".to_string());
+                }
+                if let Some(result) = result {
+                    self.expr(env, result);
                 }
             }
         }
@@ -1294,13 +1301,16 @@ mod tests {
     use super::*;
 
     use crate::{parse, FileUnit, Mode};
+    fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
+        let file_unit = parse(&bump, &"test.starlark", input, Mode::Plain)?;
+        resolve_file(file_unit, &bump, |s| false, |s| false)
+    }
 
     #[test]
     fn basic_file_global() -> Result<()> {
         let bump = Bump::new();
-        let src = "a = 3";
-        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
-        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+        let input = "a = 3";
+        let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.globals.len(), 1);
         let b = &f.module.globals[0];
@@ -1317,9 +1327,8 @@ mod tests {
     #[test]
     fn basic_file_global_error() -> Result<()> {
         let bump = Bump::new();
-        let src = "a = 3\na = 4";
-        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
-        let f = resolve_file(file_unit, &bump, |s| false, |s| false);
+        let input = "a = 3\na = 4";
+        let f = prepare(&bump, input);
         if let Err(e) = f {
             Ok(())
         } else {
@@ -1333,9 +1342,8 @@ mod tests {
     #[test]
     fn basic_file_local() -> Result<()> {
         let bump = Bump::new();
-        let src = "def f(b):\n  a = b\na = 2";
-        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
-        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+        let input = "def f(b):\n  a = b\na = 2";
+        let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.globals.len(), 2);
         let b = &f.module.globals[0];
@@ -1360,9 +1368,8 @@ mod tests {
     #[test]
     fn load_comprehension_local() -> Result<()> {
         let bump = Bump::new();
-        let src = "load('foo.sl', 'bar', baz='bak')\n[x for x in baz if bar]";
-        let file_unit = parse(&bump, &"test", src, Mode::Plain)?;
-        let f = resolve_file(file_unit, &bump, |s| false, |s| false)?;
+        let input = "load('foo.sl', 'bar', baz='bak')\n[x for x in baz if bar]";
+        let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.locals.len(), 3);
         let b = &f.module.locals[0];
@@ -1389,6 +1396,98 @@ mod tests {
         } else {
             panic!("first is None");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn nested() -> Result<()> {
+        let bump = Bump::new();
+        let input = "
+def nested():  
+  def f(d):
+    d[3] = 3
+  e = {}
+  f(e)
+  return e
+";
+        let f = prepare(&bump, input)?;
+        assert_eq!(f.module.globals.len(), 1);
+        let b = &f.module.globals[0];
+        assert_eq!(b.get_scope(), Scope::Global);
+        assert_eq!(b.index, 0);
+        if let Some(id) = b.first {
+            assert_eq!(id.name, "nested");
+        } else {
+            panic!("first is None");
+        }
+        assert_eq!(f.file_unit.stmts.len(), 1);
+        if let StmtData::DefStmt { function: f, .. } = &f.file_unit.stmts[0].data {
+            if let Some(f) = f.borrow().as_ref() {
+                let locals = &f.locals.borrow();
+                assert_eq!(locals.len(), 2);
+                assert!(matches!(locals[0].first, Some(Ident { name: "f", .. })));
+                assert!(matches!(locals[1].first, Some(Ident { name: "e", .. })));
+                Ok(())
+            } else {
+                Err(anyhow!("function not resolved"))
+            }
+        } else {
+            Err(anyhow!("no defstmt found"))
+        }
+    }
+
+    #[test]
+    fn test_body() -> Result<()> {
+        let bump = Bump::new();
+        let input = "
+def fib(n):
+  if n == 0:
+    return 1
+  if n == 1:
+    return 1
+  x = 1
+  y = 1
+  i = 0
+  while i < n:
+    tmp = x
+    x = y
+    y = x + tmp
+  return y
+";
+        let f = prepare(&bump, input)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_undefined() -> Result<()> {
+        let bump = Bump::new();
+        let input = "
+def fib(n):
+  while i < n:
+    n = i + 1
+  return i
+";
+        let f = prepare(&bump, input);
+        if let Err(e) = f {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "expected error due to undefined var {:?}.",
+                f.unwrap().file_unit
+            ))
+        }
+    }
+
+    #[test]
+    fn test_weird_defined() -> Result<()> {
+        let bump = Bump::new();
+        let input = "
+def spec_says_fails_at_runtime(n):
+  while i < n:
+    i = i + 1
+  return i
+";
+        let f = prepare(&bump, input)?;
         Ok(())
     }
 }

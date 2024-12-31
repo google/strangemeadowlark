@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - unreleased
+
+### 🚀 Features
+
+- Beginnings of a compiler & lightweight virtual machine.
+
 ## [0.3.0] - 2024-09-24
 
 ### 🚀 Features

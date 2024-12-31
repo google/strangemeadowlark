@@ -11,5 +11,6 @@ repository = "https://github.com/google/strangemeadowlark/"
 [dependencies]
 anyhow = "1.0"
 num-bigint = "0.4"
+num-traits = "0.2"
 unicode_categories = "0.1"
 bumpalo = "3.14"

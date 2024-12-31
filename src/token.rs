@@ -135,6 +135,23 @@ impl Token {
         };
         Some(prec)
     }
+
+    pub fn augmented(&self) -> Option<Token> {
+        match self {
+            Token::PlusEq => Some(Token::Plus),
+            Token::MinusEq => Some(Token::Minus),
+            Token::StarEq => Some(Token::Star),
+            Token::SlashEq => Some(Token::Slash),
+            Token::SlashSlashEq => Some(Token::SlashSlash),
+            Token::PercentEq => Some(Token::Percent),
+            Token::AmpersandEq => Some(Token::Ampersand),
+            Token::PipeEq => Some(Token::Pipe),
+            Token::CaretEq => Some(Token::Caret),
+            Token::GtGtEq => Some(Token::GtGt),
+            Token::LtLtEq => Some(Token::LtLt),
+            _ => None,
+        }
+    }
 }
 
 impl Eq for Token {}

@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unused_variables)]
+#![allow(dead_code)]
+
+mod binding;
+mod mir;
 mod parse;
 mod print;
 mod quote;
+mod resolve;
 mod scan;
 mod syntax;
 mod token;
+mod value;
 mod walk;
-
-mod binding;
-mod resolve;
 
 pub use parse::{parse, parse_expr, Mode};
 pub use print::Printer;
@@ -29,3 +33,5 @@ pub use resolve::resolve_file;
 pub use syntax::*;
 pub use token::*;
 pub use walk::{Node, NodeIterator};
+pub use mir::{MirBuilder, Lowered};
+pub use value::{Value, StarlarkType};
