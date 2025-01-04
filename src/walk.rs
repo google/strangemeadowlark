@@ -249,7 +249,7 @@ mod test {
         scan::Position,
         syntax::{Ident, Span},
         token::Token,
-        Literal, Mode,
+        Literal,
     };
 
     use super::*;
@@ -310,7 +310,7 @@ mod test {
             data: StmtData::ExprStmt { x: &foobar_expr },
         };
         let file_unit = FileUnit {
-            path: Path::new("path"),
+            path: Path::new("unknown"),
             stmts: &[&foobar_stmt],
             line_comments: &[],
             suffix_comments: &[],
@@ -330,7 +330,7 @@ mod test {
         }];
         let bump = Bump::new();
         for test_case in test_cases {
-            let res = parse(&bump, &"path", test_case.input, Mode::Plain)?;
+            let res = parse(&bump, test_case.input)?;
             let mut it = NodeIterator::new(Node::FileUnitRef(&res));
 
             let mut want_it = test_case.want.iter();

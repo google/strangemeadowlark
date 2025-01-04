@@ -27,11 +27,11 @@ mod token;
 mod value;
 mod walk;
 
-pub use parse::{parse, parse_expr, Mode};
+pub use mir::{Lowered, MirBuilder};
+pub use parse::{parse, parse_expr, parse_with_mode, Mode, ParseError};
 pub use print::Printer;
 pub use resolve::resolve_file;
 pub use syntax::*;
 pub use token::*;
+pub use value::{StarlarkType, Value};
 pub use walk::{Node, NodeIterator};
-pub use mir::{MirBuilder, Lowered};
-pub use value::{Value, StarlarkType};

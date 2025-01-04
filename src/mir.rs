@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 //! Translates to mid-level intermediate representation (inspired by rustc MIR).
 //! To learn more about the Rust MIR, see <https://rust-lang.github.io/rfcs/1211-mir.html>
 
@@ -934,13 +933,13 @@ impl BinOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse, resolve::FileUnitWithModule, resolve_file, Mode, StmtData};
+    use crate::{parse, resolve::FileUnitWithModule, resolve_file, StmtData};
 
     use super::*;
     use anyhow::{anyhow, Result};
 
     fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
-        let file_unit = parse(&bump, &"test.starlark", input, Mode::Plain)?;
+        let file_unit = parse(&bump, input)?;
         resolve_file(file_unit, &bump, |s| false, |s| false)
     }
 

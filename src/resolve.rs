@@ -1302,7 +1302,7 @@ mod tests {
 
     use crate::{parse, FileUnit, Mode};
     fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
-        let file_unit = parse(&bump, &"test.starlark", input, Mode::Plain)?;
+        let file_unit = parse(&bump, input)?;
         resolve_file(file_unit, &bump, |s| false, |s| false)
     }
 

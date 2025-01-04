@@ -18,8 +18,8 @@ use std::path::Path;
 use crate::scan::*;
 use crate::syntax::{StmtData::*, *};
 use crate::token::*;
-use anyhow::{anyhow, Result};
 use bumpalo::Bump;
+use thiserror::Error;
 
 // This file defines a recursive-descent parser for Starlark.
 // The LL(1) grammar of Starlark and the names of many productions follow Python 2.7.
@@ -31,6 +31,8 @@ use bumpalo::Bump;
 // Enable this flag to print the token stream and log.Fatal on the first error.
 const DEBUG: bool = false;
 
+type Result<T> = std::result::Result<T, ParseError>;
+
 // Mode controls optional parser functionality.
 #[derive(PartialEq, Eq)]
 pub enum Mode {
@@ -38,14 +40,82 @@ pub enum Mode {
     RetainComments,
 }
 
-// Parse parses the input data and returns the corresponding parse tree.
-//
-// If src != nil, Parse parses the source from src and the filename
-// is only used when recording position information.
-// The type of the argument for the src parameter must be string,
-// []byte, io.Reader, or FilePortion.
-// If src == nil, Parse parses the file specified by filename.
-pub fn parse<'b, P: AsRef<Path>>(
+const UNKNOWN: &str = "unknown";
+
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("{path}:{pos} got {actual}, want {expected}")]
+    UnexpectedToken {
+        path: String,
+        pos: Position,
+        actual: Token,
+        expected: Token,
+    },
+    #[error("{path}:{pos} first operand of load statement must be a string literal")]
+    LoadFirstArgMustBeString { path: String, pos: Position },
+    #[error("{path}:{pos} load operand must be {name:?} or {name:?}=\"originalname\" (want '=' after {name:?})")]
+    LoadArgMustBeNameOrBind {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error(
+        "{path}:{pos} original name of loaded symbol must be quoted: {name:?}=\"originalname\""
+    )]
+    LoadArgMustBeQuoted {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} load operand must be \"name\" or localname=\"name\" (got {actual})")]
+    LoadArgUnexpected {
+        path: String,
+        pos: Position,
+        actual: Token,
+    },
+    #[error("{path}:{pos} load statement must import at least 1 symbol")]
+    LoadMustImport { path: String, pos: Position },
+    #[error("{path}:{pos} in comprehension, got {actual}, want '}}', for, or if")]
+    ComprehensionUnexpected {
+        path: String,
+        pos: Position,
+        actual: Token,
+    },
+    #[error("{path}:{pos} keyword argument must have form name=expr")]
+    KeywordArgForm { path: String, pos: Position },
+    #[error("{path}:{pos} conditional expression without else clause")]
+    ConditionalWithoutElse { path: String, pos: Position },
+    #[error(
+        "{path}:{pos} in expression {first} does not associate with {second} (use parentheses)"
+    )]
+    BinaryExprNonAssociative {
+        path: String,
+        pos: Position,
+        first: Token,
+        second: Token,
+    },
+    #[error("{path}:{pos} expected identifier, got {actual}")]
+    ExpectedIdent {
+        path: String,
+        pos: Position,
+        actual: Token,
+    },
+    #[error("{path}:{pos} expected primary expression, got {actual}")]
+    ExpectedPrimaryExpression {
+        path: String,
+        pos: Position,
+        actual: Token,
+    },
+    #[error("{path}:{pos} unparenthesized tuple with trailing comma")]
+    UnparenthesizedTupleWithTrailingComma { path: String, pos: Position },
+    #[error("{0}")]
+    ScanError(ScanError),
+}
+
+/// Parse parses the input data, retunring FileUnit parse tree.
+///
+/// The path is only used when recording position information in errors.
+pub fn parse_with_mode<'b, P: AsRef<Path>>(
     bump: &'b Bump,
     path: &'b P,
     src: &'b str,
@@ -55,13 +125,14 @@ pub fn parse<'b, P: AsRef<Path>>(
     p.parse_file()
 }
 
-pub fn parse_expr<'b, P: AsRef<Path>>(
-    bump: &'b Bump,
-    path: &'b P,
-    src: &'b str,
-    mode: Mode,
-) -> Result<ExprRef<'b>> {
-    let mut p = Parser::new(bump, path, src, mode)?;
+/// Convenience method that calls parse_with_mode with path "unknown" and Mode::Plain.
+pub fn parse<'b>(bump: &'b Bump, src: &'b str) -> Result<&'b FileUnit<'b>> {
+    parse_with_mode(bump, &UNKNOWN, src, Mode::Plain)
+}
+
+/// Parses an expression, using path "unknown" and Mode::plain.
+pub fn parse_expr<'b>(bump: &'b Bump, src: &'b str) -> Result<ExprRef<'b>> {
+    let mut p = Parser::new(bump, &UNKNOWN, src, Mode::Plain)?;
     p.parse_expr(false)
 }
 
@@ -78,9 +149,10 @@ where
 
 impl<'a, 'b> Parser<'a, 'b> {
     fn new<P: AsRef<Path>>(bump: &'b Bump, path: &'b P, src: &'b str, mode: Mode) -> Result<Self> {
-        let mut sc = Scanner::new(bump, path, src, mode == Mode::RetainComments)?;
+        let mut sc = Scanner::new(bump, path, src, mode == Mode::RetainComments)
+            .map_err(|e| ParseError::ScanError(e))?;
         // Read first lookahead token.
-        let tok = sc.next_token()?;
+        let tok = sc.next_token().map_err(|e| ParseError::ScanError(e))?;
         let pos = sc.pos;
         Ok(Parser {
             sc,
@@ -91,13 +163,15 @@ impl<'a, 'b> Parser<'a, 'b> {
         })
     }
 
-    // next_token advances the scanner and returns the position of the
-    // previous token.
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().to_string()
+    }
+
+    /// advances the scanner and returns the position of the previous token.
     fn next_token(&mut self) -> Result<Position> {
         let old_pos = self.sc.pos;
-        self.tok = self.sc.next_token()?;
+        self.tok = self.sc.next_token().map_err(|e| ParseError::ScanError(e))?;
         self.pos = old_pos;
-        // enable to see the token stream
         if DEBUG {
             println!("next_token: {} {}", self.tok.kind, self.pos);
         }
@@ -106,12 +180,13 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     fn consume(&mut self, expected: Token) -> Result<Position> {
         if self.tok.kind != expected {
-            return Err(anyhow!(
-                "{} got {}, want {}",
-                self.tok.pos,
-                self.tok.kind,
-                expected
-            ));
+            return Err(ParseError::UnexpectedToken {
+                path: self.path_string(),
+                pos: self.tok.pos,
+                actual: self.tok.kind.clone(),
+                expected,
+            }
+            .into());
         }
         self.next_token()
     }
@@ -373,10 +448,11 @@ where {
         self.consume(Token::LParen)?;
 
         if !matches!(self.tok.kind, Token::String { .. }) {
-            return Err(anyhow!(
-                "{} first operand of load statement must be a string literal",
-                self.pos
-            ));
+            return Err(ParseError::LoadFirstArgMustBeString {
+                path: self.path_string(),
+                pos: self.pos,
+            }
+            .into());
         }
         let module = self.parse_primary()?; // .(*Literal)
 
@@ -403,21 +479,21 @@ where {
                     let id = self.parse_ident()?;
                     to.push(id);
                     if self.tok.kind != Token::Eq {
-                        return Err(anyhow!(
-                            "{} load operand must be {} or {}=\"originalname\" (want '=' after {})",
-                            self.pos,
+                        return Err(ParseError::LoadArgMustBeNameOrBind {
+                            path: self.path_string(),
+                            pos: self.pos,
                             name,
-                            name,
-                            name
-                        ));
+                        }
+                        .into());
                     }
                     self.consume(Token::Eq)?;
                     if !matches!(self.tok.kind, Token::String { .. }) {
-                        return Err(anyhow!(
-                            "{} original name of loaded symbol must be quoted: {}=\"originalname\"",
-                            self.pos,
-                            name
-                        ));
+                        return Err(ParseError::LoadArgMustBeQuoted {
+                            path: self.path_string(),
+                            pos: self.pos,
+                            name,
+                        }
+                        .into());
                     }
                     let lit = self.parse_primary()?; // .(*Literal)
                     match &lit.data {
@@ -430,21 +506,23 @@ where {
                     }
                 }
                 _ => {
-                    return Err(anyhow!(
-                        "{} load operand must be \"name\" or localname=\"name\" (got {})",
-                        self.pos,
-                        self.tok.kind
-                    ))
+                    return Err(ParseError::LoadArgUnexpected {
+                        path: self.path_string(),
+                        pos: self.pos,
+                        actual: self.tok.kind.clone(),
+                    }
+                    .into())
                 }
             }
         }
         let rparen = self.consume(Token::RParen)?;
 
         if to.is_empty() {
-            return Err(anyhow!(
-                "{} load statement must import at least 1 symbol",
-                self.pos
-            ));
+            return Err(ParseError::LoadMustImport {
+                path: self.path_string(),
+                pos: self.pos,
+            }
+            .into());
         }
         let to = self.bump.alloc_slice_copy(&to.into_boxed_slice());
         let from = self.bump.alloc_slice_copy(&from.into_boxed_slice());
@@ -592,10 +670,11 @@ where {
             let if_pos = self.next_token()?;
             let cond = self.parse_test_prec(0)?;
             if self.tok.kind != Token::Else {
-                return Err(anyhow!(
-                    "{} conditional expression without else clause",
-                    if_pos
-                ));
+                return Err(ParseError::ConditionalWithoutElse {
+                    path: self.path_string(),
+                    pos: if_pos,
+                }
+                .into());
             }
             let else_pos = self.next_token()?;
             let else_ = self.parse_test()?;
@@ -625,7 +704,12 @@ where {
                 self.next_token()?;
                 Ok(id)
             }
-            _ => Err(anyhow!("{} not an identifier", self.pos)),
+            tok => Err(ParseError::ExpectedIdent {
+                path: self.path_string(),
+                pos: self.pos,
+                actual: tok,
+            }
+            .into()),
         }
     }
 
@@ -836,11 +920,12 @@ where {
                 });
                 Ok(unary_expr)
             }
-            _ => Err(anyhow!(
-                "{} got {}, want primary expression",
-                self.pos,
-                self.tok.kind
-            )),
+            _ => Err(ParseError::ExpectedPrimaryExpression {
+                path: self.path_string(),
+                pos: self.pos,
+                actual: self.tok.kind.clone(),
+            }
+            .into()),
         }
     }
 
@@ -983,7 +1068,11 @@ where {
             let pos = self.next_token()?;
             if terminates_expr_list(&self.tok.kind) {
                 if !allow_trailing_comma {
-                    return Err(anyhow!("{} unparenthesized tuple with trailing comma", pos));
+                    return Err(ParseError::UnparenthesizedTupleWithTrailingComma {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    }
+                    .into());
                 }
                 break;
             }
@@ -1086,12 +1175,12 @@ where {
                 let clause = self.bump.alloc(Clause::IfClause { if_pos, cond });
                 clauses.push(&*clause);
             } else {
-                return Err(anyhow!(
-                    "{} got {}, want '{}', for, or if",
-                    self.pos,
-                    self.tok.kind,
-                    end_brace
-                ));
+                return Err(ParseError::ComprehensionUnexpected {
+                    path: self.path_string(),
+                    pos: self.pos,
+                    actual: self.tok.kind.clone(),
+                }
+                .into());
             }
         }
         let rbrace = self.next_token()?;
@@ -1189,10 +1278,11 @@ where {
             if self.tok.kind == Token::Eq {
                 // name = value
                 if !matches!(x.data, ExprData::Ident { .. }) {
-                    return Err(anyhow!(
-                        "{} keyword argument must have form name=expr",
-                        self.pos
-                    ));
+                    return Err(ParseError::KeywordArgForm {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    }
+                    .into());
                 }
                 let op_pos = self.next_token()?;
                 let y = self.parse_test()?;
@@ -1245,7 +1335,13 @@ where {
                                     // In this context, NOT must be followed by IN.
                                     // Replace NOT IN by a single NOT_IN token.
                 if self.tok.kind != Token::In {
-                    return Err(anyhow!("{} got {}, want in", self.pos, self.tok.kind));
+                    return Err(ParseError::UnexpectedToken {
+                        path: self.path_string(),
+                        pos: self.pos,
+                        actual: self.tok.kind.clone(),
+                        expected: Token::In,
+                    }
+                    .into());
                 }
                 self.tok.kind = Token::NotIn;
             }
@@ -1260,12 +1356,13 @@ where {
             if !first && op_prec == Token::Eq.precedence() {
                 match &x.data {
                     ExprData::BinaryExpr { op, .. } => {
-                        return Err(anyhow!(
-                            "{} {} does not associate with {} (use parens)",
-                            self.pos,
-                            op,
-                            self.tok.kind
-                        ))
+                        return Err(ParseError::BinaryExprNonAssociative {
+                            path: self.path_string(),
+                            pos: self.pos,
+                            first: op.clone(),
+                            second: self.tok.kind.clone(),
+                        }
+                        .into())
                     }
                     _ => unreachable!(),
                 }
@@ -1391,6 +1488,22 @@ fn terminates_expr_list(tok: &Token) -> bool {
 mod test {
 
     use super::*;
+    use anyhow::{anyhow, Result};
+
+    #[test]
+    pub fn test_expr_parse_error() -> Result<()> {
+        let bump = Bump::new();
+        let x = parse_expr(&bump, "x(()");
+        match x {
+            Err(e @ ParseError::UnexpectedToken { .. }) => {
+                assert_eq!(e.to_string(), "unknown:1:5 got eof, want )");
+                Ok(())
+            }
+            Err(e) => Err(anyhow!("wrong error: {e}")),
+            Ok(_) => Err(anyhow!("no error")),
+        }
+    }
+
     struct TestCase {
         input: &'static str,
         want: &'static str, //ExprRef<'b>,
@@ -1398,7 +1511,7 @@ mod test {
 
     #[test]
     pub fn test_expr_parse_trees() {
-        let bump = super::Bump::new();
+        let bump = Bump::new();
         let test_cases = vec![
             TestCase {
                 input: "print(1)",
@@ -1519,7 +1632,7 @@ mod test {
                 want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))"}, // github.com/google/skylark/issues/53
                 ];
         for test_case in test_cases {
-            match super::parse_expr(&bump, &"foo.star", test_case.input, Mode::Plain) {
+            match super::parse_expr(&bump, test_case.input) {
                 Ok(expr) => {
                     let s = format!("{}", expr.data);
                     assert_eq!(s, test_case.want)
@@ -1648,7 +1761,7 @@ def h():
               },
         ];
         for test_case in test_cases {
-            match super::parse(&bump, &"foo.star", test_case.input, Mode::Plain) {
+            match super::parse(&bump, test_case.input) {
                 Ok(file_unit) if file_unit.stmts.len() >= 1 => {
                     let s = format!("{}", file_unit.stmts[0].data);
                     assert_eq!(s, test_case.want)
@@ -1665,7 +1778,7 @@ def h():
         let input = "# Hello world
 foo() #Suffix
 # Goodbye world";
-        let res = super::parse(&bump, &"foo.star", input, Mode::RetainComments)?;
+        let res = parse_with_mode(&bump, &"foo.star", input, Mode::RetainComments)?;
         assert_eq!(
             res.line_comments,
             vec![

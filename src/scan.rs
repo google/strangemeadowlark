@@ -14,10 +14,63 @@
 
 use crate::token::{keyword, IntValue, Token};
 use crate::Literal;
-use anyhow::anyhow;
 use bumpalo::Bump;
 use std::fmt::Display;
 use std::path::Path;
+use thiserror::Error;
+
+type Result<T> = std::result::Result<T, ScanError>;
+
+#[derive(Error, Debug)]
+
+pub enum ScanError {
+    #[error("{path}:{pos} unindent does not match any outer indentation level")]
+    UnindentDoesNotMatchOuterLevel { path: String, pos: Position },
+    #[error("{path}:{pos} stray backslash in program")]
+    StrayBackslash { path: String, pos: Position },
+    #[error("{path}:{pos} unexpected character '{ch}'")]
+    UnexpectedChar {
+        path: String,
+        pos: Position,
+        ch: char,
+    },
+    #[error("{path}:{pos} invalid float literal")]
+    InvalidFloatLiteral { path: String, pos: Position },
+    #[error("{path}:{pos} unexpected eof in string literal")]
+    UnexpectedEofInString { path: String, pos: Position },
+    #[error("{path}:{pos} unexpected newline in string literal")]
+    UnexpectedNewlineInString { path: String, pos: Position },
+    #[error("{path}:{pos} unquoting error: {msg}")]
+    UnquoteError {
+        path: String,
+        pos: Position,
+        msg: String,
+    },
+    #[error("{path}:{pos} invalid hex literal")]
+    InvalidHexLiteral { path: String, pos: Position },
+    #[error("{path}:{pos} invalid octal literal")]
+    InvalidOctalLiteral { path: String, pos: Position },
+    #[error("{path}:{pos} invalid binary literal")]
+    InvalidBinaryLiteral { path: String, pos: Position },
+    #[error("{path}:{pos} obsolete form of octal literal; use 0o...")]
+    ObsoleteOctalLiteral { path: String, pos: Position },
+    #[error("{path}:{pos} could not parse big int")]
+    CouldNotParseDecimalBigInt { path: String, pos: Position },
+    #[error("{path}:{pos} could not parse hex big int")]
+    CouldNotParseHexBigInt { path: String, pos: Position },
+    #[error("{path}:{pos} could not parse integer")]
+    ParseIntError {
+        path: String,
+        pos: Position,
+        msg: String,
+    },
+    #[error("{path}:{pos} could not parse float")]
+    ParseFloatError {
+        path: String,
+        pos: Position,
+        msg: String,
+    },
+}
 
 // A Position describes the location of a rune of input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,13 +81,7 @@ pub struct Position {
 
 impl Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}",
-            //self.path.to_string_lossy(),
-            self.line,
-            self.col
-        )
+        write!(f, "{}:{}", self.line, self.col)
     }
 }
 
@@ -87,7 +134,7 @@ where
         path: &'a P,
         data: &'a str,
         keep_comments: bool,
-    ) -> anyhow::Result<Scanner<'a, 'b>> {
+    ) -> Result<Scanner<'a, 'b>> {
         //let pos = Position::new();//path.as_ref());
         Ok(Scanner {
             bump,
@@ -107,6 +154,10 @@ where
                 pos: Position::new(),
             },
         })
+    }
+
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().to_string()
     }
 
     // peek returns the next char in the input without consuming it.
@@ -163,7 +214,7 @@ where
     // position where the token begins), token (the input string
     // corresponding to the token).  For string and int tokens, the decoded
     // field additionally contains the token's interpreted value.
-    pub fn next_token(&mut self) -> anyhow::Result<TokenValue> {
+    pub fn next_token(&mut self) -> Result<TokenValue> {
         self.next_token_internal().map(|()| self.token_buf.clone())
     }
 
@@ -181,7 +232,7 @@ where
         })
     }
 
-    pub fn next_token_internal(&mut self) -> anyhow::Result<()> {
+    pub fn next_token_internal(&mut self) -> Result<()> {
         #[allow(clippy::never_loop)] // clippy is wrong here.
         loop {
             self.token_buf.kind = Token::Illegal;
@@ -227,11 +278,10 @@ where
                                     self.indentstk.pop();
                                 }
                                 if col != *self.indentstk.last().unwrap() {
-                                    return Err(anyhow!(
-                                        "{}{:?} unindent does not match any outer indentation level",
-                                        self.path.to_string_lossy(),
-                                        self.pos
-                                    ));
+                                    return Err(ScanError::UnindentDoesNotMatchOuterLevel {
+                                        path: self.path_string(),
+                                        pos: self.pos,
+                                    });
                                 }
                             }
                             std::cmp::Ordering::Equal => {}
@@ -348,11 +398,11 @@ where
                 if c == '\\' {
                     self.read();
                     if self.peek() != '\n' {
-                        return Err(anyhow!(
-                            "{}{} stray backslash in program",
-                            self.path.to_string_lossy(),
-                            self.pos
-                        ));
+                        return Err(ScanError::StrayBackslash {
+                            path: self.path_string(),
+                            pos: self.pos,
+                        }
+                        .into());
                     }
                     self.read();
                     break 'start;
@@ -444,12 +494,11 @@ where
                     }
                     ']' | ')' | '}' => {
                         if self.depth == 0 {
-                            return Err(anyhow!(
-                                "{}:{} unexpected '{}'",
-                                self.path.to_string_lossy(),
-                                self.pos,
-                                c
-                            ));
+                            return Err(ScanError::UnexpectedChar {
+                                path: self.path_string(),
+                                pos: self.pos,
+                                ch: c,
+                            });
                         } else {
                             self.depth -= 1
                         }
@@ -585,11 +634,11 @@ where
                                 return Ok(());
                             }
                             '!' => {
-                                return Err(anyhow!(
-                                    "{}{} unexpected input character '!'",
-                                    self.path.to_string_lossy(),
-                                    start
-                                ))
+                                return Err(ScanError::UnexpectedChar {
+                                    path: self.path_string(),
+                                    pos: start,
+                                    ch: '!',
+                                })
                             }
                             '+' => {
                                 self.token_buf.kind = Token::Plus;
@@ -683,19 +732,18 @@ where
                         }
                     }
                     _ => {
-                        return Err(anyhow!(
-                            "{}:{} unexpected input character {}",
-                            self.path.to_string_lossy(),
-                            self.pos,
-                            c
-                        ))
+                        return Err(ScanError::UnexpectedChar {
+                            path: self.path_string(),
+                            pos: self.pos,
+                            ch: c,
+                        })
                     }
                 }
             }
         }
     }
 
-    fn scan_string(&mut self, quote: char) -> anyhow::Result<()> {
+    fn scan_string(&mut self, quote: char) -> Result<()> {
         let triple = self.rest.starts_with(if quote == '\'' {
             TRIPLE_QUOTE
         } else {
@@ -715,11 +763,10 @@ where
             // single-quoted string literal
             loop {
                 if self.rest.is_empty() {
-                    return Err(anyhow!(
-                        "{}:{:?} unexpected eof in string",
-                        self.path.to_string_lossy(),
-                        self.pos
-                    ));
+                    return Err(ScanError::UnexpectedEofInString {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    });
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -727,19 +774,17 @@ where
                     break;
                 }
                 if c == '\n' {
-                    return Err(anyhow!(
-                        "{}:{:?} unexpected newline in string",
-                        self.path.to_string_lossy(),
-                        self.pos
-                    ));
+                    return Err(ScanError::UnexpectedNewlineInString {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    });
                 }
                 if c == '\\' {
                     if self.rest.is_empty() {
-                        return Err(anyhow!(
-                            "{}:{:?} unexpected eof in string",
-                            self.path.to_string_lossy(),
-                            self.pos
-                        ));
+                        return Err(ScanError::UnexpectedEofInString {
+                            path: self.path_string(),
+                            pos: self.pos,
+                        });
                     }
                     c = self.read();
                     raw.push(c)
@@ -755,11 +800,10 @@ where
             let mut quote_count = 0;
             loop {
                 if self.rest.is_empty() {
-                    return Err(anyhow!(
-                        "{}:{:?} unexpected eof in string",
-                        self.path.to_string_lossy(),
-                        self.pos
-                    ));
+                    return Err(ScanError::UnexpectedEofInString {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    });
                 }
                 let mut c = self.read();
                 raw.push(c);
@@ -774,7 +818,10 @@ where
                 }
                 if c == '\\' {
                     if self.rest.is_empty() {
-                        return Err(anyhow!("{:?} unexpected eof in string", self.pos));
+                        return Err(ScanError::UnexpectedEofInString {
+                            path: self.path_string(),
+                            pos: self.pos,
+                        });
                     }
                     c = self.read();
                     raw.push(c)
@@ -790,18 +837,17 @@ where
                 self.token_buf.kind = Token::Bytes { decoded }
             }
             Err(e) => {
-                return Err(anyhow!(
-                    "{}:{} error unquoting: {}",
-                    self.path.to_string_lossy(),
-                    self.pos,
-                    e
-                ))
+                return Err(ScanError::UnquoteError {
+                    path: self.path_string(),
+                    pos: self.pos,
+                    msg: e.to_string(),
+                })
             }
         }
         Ok(())
     }
 
-    fn scan_number(&mut self, ch: char) -> anyhow::Result<()> {
+    fn scan_number(&mut self, ch: char) -> Result<()> {
         let mut c = ch;
         // https://github.com/google/starlark-go/blob/master/doc/spec.md#lexical-elements
         //
@@ -836,7 +882,10 @@ where
                 self.read();
                 c = self.peek();
                 if !c.is_ascii_hexdigit() {
-                    return Err(anyhow!("{} invalid hex literal", start));
+                    return Err(ScanError::InvalidHexLiteral {
+                        path: self.path_string(),
+                        pos: start,
+                    });
                 }
                 while c.is_ascii_hexdigit() {
                     self.read();
@@ -847,7 +896,10 @@ where
                 self.read();
                 c = self.peek();
                 if !c.is_digit(8) {
-                    return Err(anyhow!("{} invalid octal literal", start));
+                    return Err(ScanError::InvalidOctalLiteral {
+                        path: self.path_string(),
+                        pos: start,
+                    });
                 }
                 while c.is_digit(8) {
                     self.read();
@@ -858,7 +910,10 @@ where
                 self.read();
                 c = self.peek();
                 if !c.is_digit(2) {
-                    return Err(anyhow!("{} invalid binary literal ", start));
+                    return Err(ScanError::InvalidBinaryLiteral {
+                        path: self.path_string(),
+                        pos: start,
+                    });
                 }
                 while c.is_digit(2) {
                     self.read();
@@ -884,11 +939,10 @@ where
                     exponent = true
                 } else if octal && !allzeros {
                     self.mark_end_token();
-                    return Err(anyhow!(
-                        "{}:{} obsolete form of octal literal; use 0o...",
-                        self.path.to_string_lossy(),
-                        self.pos,
-                    ));
+                    return Err(ScanError::ObsoleteOctalLiteral {
+                        path: self.path_string(),
+                        pos: self.pos,
+                    });
                 }
             }
         } else {
@@ -925,11 +979,10 @@ where
                 self.read();
                 c = self.peek();
                 if !c.is_ascii_digit() {
-                    return Err(anyhow!(
-                        "{}:{} invalid float literal",
-                        self.path.to_string_lossy(),
-                        start
-                    ));
+                    return Err(ScanError::InvalidFloatLiteral {
+                        path: self.path_string(),
+                        pos: start,
+                    });
                 }
             }
             while c.is_ascii_digit() {
@@ -940,7 +993,14 @@ where
 
         self.mark_end_token();
         if fraction || exponent {
-            let float_value = self.token.parse::<f64>()?;
+            let float_value =
+                self.token
+                    .parse::<f64>()
+                    .map_err(|e| ScanError::ParseFloatError {
+                        path: self.path_string(),
+                        pos: self.pos,
+                        msg: e.to_string(),
+                    })?;
             self.token_buf.kind = Token::Float { float_value };
             return Ok(());
         }
@@ -948,14 +1008,24 @@ where
         if s.len() > 2 {
             match &s[..2] {
                 "0o" | "0O" => {
-                    let int_value = i64::from_str_radix(&s[2..], 8)?;
+                    let int_value =
+                        i64::from_str_radix(&s[2..], 8).map_err(|e| ScanError::ParseIntError {
+                            path: self.path_string(),
+                            pos: self.pos,
+                            msg: e.to_string(),
+                        })?;
                     self.token_buf.kind = Token::Int {
                         decoded: IntValue::Int(int_value),
                     };
                     return Ok(());
                 }
                 "0b" | "0B" => {
-                    let int_value = i64::from_str_radix(&s[2..], 2)?;
+                    let int_value =
+                        i64::from_str_radix(&s[2..], 2).map_err(|e| ScanError::ParseIntError {
+                            path: self.path_string(),
+                            pos: self.pos,
+                            msg: e.to_string(),
+                        })?;
                     self.token_buf.kind = Token::Int {
                         decoded: IntValue::Int(int_value),
                     };
@@ -970,11 +1040,10 @@ where
                     }
                     _ => {
                         let bigint_value = num_bigint::BigInt::parse_bytes(s[2..].as_bytes(), 16)
-                            .ok_or(anyhow!(
-                            "{}:{} could not parse hex big int",
-                            self.path.to_string_lossy(),
-                            start
-                        ))?;
+                            .ok_or(ScanError::CouldNotParseHexBigInt {
+                            path: self.path_string(),
+                            pos: start,
+                        })?;
                         self.token_buf.kind = Token::Int {
                             decoded: IntValue::BigInt(bigint_value),
                         };
@@ -992,12 +1061,12 @@ where
                 };
             }
             _ => {
-                let bigint_value =
-                    num_bigint::BigInt::parse_bytes(s.as_bytes(), 10).ok_or(anyhow!(
-                        "{}:{} could not parse big int",
-                        self.path.to_string_lossy(),
-                        start
-                    ))?;
+                let bigint_value = num_bigint::BigInt::parse_bytes(s.as_bytes(), 10).ok_or(
+                    ScanError::CouldNotParseDecimalBigInt {
+                        path: self.path_string(),
+                        pos: start,
+                    },
+                )?;
                 self.token_buf.kind = Token::Int {
                     decoded: IntValue::BigInt(bigint_value),
                 };
@@ -1022,7 +1091,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_seq() -> anyhow::Result<()> {
+    fn test_basic_seq() -> Result<()> {
         use Token::*;
         let expected: Vec<Token> = vec![LBrace, LParen, LBrack, RBrack, RParen, RBrace, Eof];
         let mut tokens: Vec<Token> = vec![];
