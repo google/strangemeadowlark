@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     let src = read_to_string(&path)?;
     let bump = Bump::new();
     let unit = parse_with_mode(&bump, &path, &src, Mode::RetainComments)?;
-    _ = resolve_file(unit, &bump, |_| false, |_| false)?;
+    resolve_file(unit, &bump, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
     for stmt in unit.stmts {
         println!("{}", stmt.data);
     }

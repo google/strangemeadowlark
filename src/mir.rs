@@ -940,7 +940,7 @@ mod tests {
 
     fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
         let file_unit = parse(&bump, input)?;
-        resolve_file(file_unit, &bump, |s| false, |s| false)
+        resolve_file(file_unit, &bump, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
     }
 
     #[test]

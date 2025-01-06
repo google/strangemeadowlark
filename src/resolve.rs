@@ -3,14 +3,17 @@
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::binding::{Binding, Function, Module, Scope};
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
-use anyhow::{anyhow, Result};
 use bumpalo::Bump;
+use thiserror::Error;
+
+type Result<T> = std::result::Result<T, ResolveError>;
 
 // All references to names are statically resolved.  Names may be
 // predeclared, global, or local to a function or file.
@@ -92,16 +95,120 @@ const DOESNT: &str = "this Starlark dialect does not ";
 const FILE_BLOCK: usize = 0;
 
 // An Error describes the nature and position of a resolver error.
-#[derive(Debug)]
-struct Error {
-    pos: Position,
-    msg: String,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.pos, self.msg)
-    }
+#[derive(Error, Debug, Clone)]
+pub enum ResolveError {
+    #[error("{path}:{pos} undefined: {name}")]
+    Undefined {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} duplicate parameter: {name}")]
+    DuplicateParameter {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} required parameter may not follow **{name}")]
+    RequiredParameterMayNotFollowStarStar {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} required parameter may not follow optional")]
+    RequiredParameterMayNotFollowOptional { path: String, pos: Position },
+    #[error("{path}:{pos} optional parameter may not follow **{name}")]
+    OptionalParameterMayNotFollowStarStar {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} * parameter may not follow **{name}")]
+    StarMayNotFollowStarStart {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} bare * must be followed by keyword-only parameters")]
+    StarMustBeFollowedByKeywordOnlyParameters { path: String, pos: Position },
+    #[error("{path}:{pos} multiple * parameters not allowed")]
+    MultipleStarParametersNotAllowed { path: String, pos: Position },
+    #[error("{path}:{pos} multiple ** parameters not allowed")]
+    MultipleStarStarParametersNotAllowed { path: String, pos: Position },
+    #[error("{path}:{pos} cannot reassign {scope} {name} declared at {first}")]
+    GlobalReassign {
+        path: String,
+        pos: Position,
+        scope: Scope,
+        name: String,
+        first: Position,
+    },
+    #[error("{path}:{pos} load stmt within a function")]
+    LoadWithinFunction { path: String, pos: Position },
+    #[error("{path}:{pos} cannot reassign top-level")]
+    LoadCannotReassignTopLevel {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} load: empty identifier")]
+    LoadEmptyIdentifier { path: String, pos: Position },
+    #[error("{path}:{pos} load: names with leading _ are not exported")]
+    LoadNameWithLeadingUnderscore { path: String, pos: Position },
+    #[error("{path}:{pos} if statement not within a function")]
+    IfNotWithinFunction { path: String, pos: Position },
+    #[error("{path}:{pos} return stmt not within a function")]
+    ReturnNotWithinFunction { path: String, pos: Position },
+    #[error("{path}:{pos} for loop not within a function")]
+    ForLoopNotWithinFunction { path: String, pos: Position },
+    #[error("{path}:{pos} while loop not within a function")]
+    WhileLoopNotWithinFunction { path: String, pos: Position },
+    #[error("{path}:{pos} encountered {token} outside of loop")]
+    BranchNotInLoop {
+        path: String,
+        pos: Position,
+        token: Token,
+    },
+    #[error("{path}:{pos} encountered {num} positional arguments in call, limit is 255")]
+    TooManyPositionalArgumentsInCall {
+        path: String,
+        pos: Position,
+        num: i32,
+    },
+    #[error("{path}:{pos} encountered {num} keyword arguments in call, limit is 255")]
+    TooManyKeywordArgumentsInCall {
+        path: String,
+        pos: Position,
+        num: i32,
+    },
+    #[error("{path}:{pos} multiple **kwargs not allowed")]
+    MultipleKeywordArgsNotAllowed { path: String, pos: Position },
+    #[error("{path}:{pos} args may not follow **kwargs")]
+    ArgsMayNotFollowKeywordArgs { path: String, pos: Position },
+    #[error("{path}:{pos} multiple **kwargs not allowed")]
+    MultipleStarStarArgsNotAllowed { path: String, pos: Position },
+    #[error("{path}:{pos} keyword argument may not follow *args")]
+    KeywordArgumentMayNotFollowStarStarKeywordArgs { path: String, pos: Position },
+    #[error("{path}:{pos} keyword argument may not follow **kwargs")]
+    KeywordArgumentMayNotFollowStarKeywordArgs { path: String, pos: Position },
+    #[error("{path}:{pos} keyword argument {name}")]
+    KeywordArgumentIsRepeated {
+        path: String,
+        pos: Position,
+        name: String,
+    },
+    #[error("{path}:{pos} positional argument may not follow *arg")]
+    PositionalArgumentMayNotFollowStarArg { path: String, pos: Position },
+    #[error("{path}:{pos} positional argument may not follow **kwarg")]
+    PositionalArgumentMayNotFollowStarStarArg { path: String, pos: Position },
+    #[error("{path}:{pos} positional argument may not follow named arg")]
+    PositionalArgumentMayNotFollowNamed { path: String, pos: Position },
+    #[error("{path}:{pos} cannot use tuple expression in augmented assignment")]
+    CannotUseTupleinAugmentedAssign { path: String, pos: Position },
+    #[error("{path}:{pos} cannot use list expression in augmented assignment")]
+    CannotUseListinAugmentedAssign { path: String, pos: Position },
+    #[error("{path}:{pos} cannot assign to this expression")]
+    CannotAssign { path: String, pos: Position },
 }
 
 // File resolves the specified file and records information about the
@@ -122,29 +229,30 @@ pub fn resolve_file<'a>(
     bump: &'a Bump,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
-) -> Result<&'a FileUnitWithModule<'a>> {
+) -> std::result::Result<&'a FileUnitWithModule<'a>, Vec<ResolveError>> {
     repl_chunk(file, bump, None, is_predeclared, is_universal)
 }
 
 // REPLChunk is a generalization of the File function that supports a
 // non-empty initial global block, as occurs in a REPL.
 pub fn repl_chunk<'a>(
-    file: &'a FileUnit<'a>,
+    file_unit: &'a FileUnit<'a>,
     bump: &'a Bump,
     is_global: Option<fn(&str) -> bool>,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
-) -> Result<&'a FileUnitWithModule<'a>> {
+) -> std::result::Result<&'a FileUnitWithModule<'a>, Vec<ResolveError>> {
     let file_block = bump.alloc(Block::new_file());
     let blocks = vec![&*file_block];
     let r = bump.alloc(Resolver::new(
         bump,
+        file_unit.path,
         blocks,
         is_global,
         is_predeclared,
         is_universal,
     ));
-    r.stmts(FILE_BLOCK, file.stmts);
+    r.stmts(FILE_BLOCK, file_unit.stmts);
     r.resolve_local_uses(file_block);
 
     // At the end of the module, resolve all non-local variable references,
@@ -153,7 +261,7 @@ pub fn repl_chunk<'a>(
     r.resolve_non_local_uses(FILE_BLOCK);
 
     if !r.errors.borrow().is_empty() {
-        return Err(anyhow!("errors: {:?}", r.errors.borrow()));
+        return Err(r.errors.borrow().clone());
     }
     let mut module_locals = vec![];
     for v in r.module_locals.borrow().iter() {
@@ -164,7 +272,7 @@ pub fn repl_chunk<'a>(
         module_globals.push(v.clone())
     }
     Ok(bump.alloc(FileUnitWithModule {
-        file_unit: file,
+        file_unit,
         module: Module {
             locals: module_locals,
             globals: module_globals,
@@ -244,6 +352,7 @@ impl<'a> Block<'a> {
 
 pub struct Resolver<'a> {
     bump: &'a Bump,
+    path: &'a Path,
     // file = blocks[0]
     blocks: RefCell<Vec<&'a Block<'a>>>,
     // moduleLocals contains the local variables of the module
@@ -268,12 +377,13 @@ pub struct Resolver<'a> {
     loops: u16,   // number of enclosing for/while loops
     ifstmts: u16, // number of enclosing if statements loops
 
-    errors: RefCell<Vec<Error>>,
+    errors: RefCell<Vec<ResolveError>>,
 }
 
 impl<'a> Resolver<'a> {
     fn new(
         bump: &'a Bump,
+        path: &'a Path,
         blocks: Vec<&'a Block<'a>>,
         is_global: Option<fn(&str) -> bool>,
         is_predeclared: fn(&str) -> bool,
@@ -281,6 +391,7 @@ impl<'a> Resolver<'a> {
     ) -> Self {
         Resolver {
             bump,
+            path,
             blocks: RefCell::new(blocks),
             //env: RefCell::new(file_block),
             is_global,
@@ -294,6 +405,10 @@ impl<'a> Resolver<'a> {
             ifstmts: 0,
             errors: RefCell::new(vec![]),
         }
+    }
+
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().to_string()
     }
 
     // resolveLocalUses is called when leaving a container (function/module)
@@ -423,7 +538,11 @@ impl<'a> Resolver<'a> {
 
             StmtData::BranchStmt { token, token_pos } => {
                 if self.loops == 0 && (*token == Token::Break || *token == Token::Continue) {
-                    self.errorf(token_pos.clone(), format!("{} not in a loop", token))
+                    self.push_error(ResolveError::BranchNotInLoop {
+                        path: self.path_string(),
+                        pos: token_pos.clone(),
+                        token: token.clone(),
+                    })
                 }
             }
 
@@ -435,10 +554,12 @@ impl<'a> Resolver<'a> {
                 else_arm,
             } => {
                 if let None = self.container(env).function {
-                    self.errors.borrow_mut().push(Error {
-                        pos: if_pos.clone(),
-                        msg: format!("if statement not within a function"),
-                    })
+                    self.errors
+                        .borrow_mut()
+                        .push(ResolveError::IfNotWithinFunction {
+                            path: self.path_string(),
+                            pos: if_pos.clone(),
+                        })
                 }
                 self.expr(env, &cond);
                 //self.ifstmts++
@@ -489,7 +610,10 @@ impl<'a> Resolver<'a> {
             } => {
                 // Assuming !option.TopLevelControl
                 if self.container(env).function.is_none() {
-                    self.errorf(*for_pos, "for loop not within a function".to_string());
+                    self.push_error(ResolveError::ForLoopNotWithinFunction {
+                        path: self.path_string(),
+                        pos: *for_pos,
+                    });
                 }
                 self.expr(env, x);
                 let is_augmented = false;
@@ -503,7 +627,10 @@ impl<'a> Resolver<'a> {
             } => {
                 // Assuming option.While and !option.TopLevelControl
                 if self.container(env).function.is_none() {
-                    self.errorf(*while_pos, "while loop not within a function".to_string());
+                    self.push_error(ResolveError::WhileLoopNotWithinFunction {
+                        path: self.path_string(),
+                        pos: *while_pos,
+                    });
                 }
                 self.expr(env, cond);
                 self.stmts(env, body);
@@ -516,32 +643,42 @@ impl<'a> Resolver<'a> {
                 rparen_pos,
             } => {
                 if self.container(env).function.is_some() {
-                    self.errorf(*load_pos, "load stmt within a function".to_string());
+                    self.push_error(ResolveError::LoadWithinFunction {
+                        path: self.path_string(),
+                        pos: *load_pos,
+                    });
                 }
                 for (i, from) in from.iter().enumerate() {
                     if from.name.is_empty() {
-                        self.errorf(from.name_pos, "load: empty identifier".to_string());
+                        self.push_error(ResolveError::LoadEmptyIdentifier {
+                            path: self.path_string(),
+                            pos: from.name_pos,
+                        });
                         continue;
                     }
                     if from.name.starts_with('_') {
-                        self.errorf(
-                            from.name_pos,
-                            "load: names with leading _ are not exported".to_string(),
-                        );
+                        self.push_error(ResolveError::LoadNameWithLeadingUnderscore {
+                            path: self.path_string(),
+                            pos: from.name_pos,
+                        });
                     }
                     let id = to[i];
                     // Assume !LoadBindsGlobally
                     if self.bind_local(env, id) {
-                        self.errorf(
-                            id.name_pos,
-                            format!("cannot reassign top-level {}", id.name),
-                        );
+                        self.push_error(ResolveError::LoadCannotReassignTopLevel {
+                            path: self.path_string(),
+                            pos: id.name_pos,
+                            name: id.name.to_string(),
+                        });
                     }
                 }
             }
             StmtData::ReturnStmt { return_pos, result } => {
                 if self.container(env).function.is_none() {
-                    self.errorf(*return_pos, "return stmt not within a function".to_string());
+                    self.push_error(ResolveError::ReturnNotWithinFunction {
+                        path: self.path_string(),
+                        pos: *return_pos,
+                    });
                 }
                 if let Some(result) = result {
                     self.expr(env, result);
@@ -571,10 +708,10 @@ impl<'a> Resolver<'a> {
             ExprData::TupleExpr { list, .. } => {
                 // (x, y) = ...
                 if is_augmented {
-                    self.errorf(
-                        lhs.span.start,
-                        "can't use tuple expression in augmented assignment".to_string(),
-                    )
+                    self.push_error(ResolveError::CannotUseTupleinAugmentedAssign {
+                        path: self.path_string(),
+                        pos: lhs.span.start,
+                    })
                 }
                 for elem in list.iter() {
                     self.assign(env, elem, is_augmented)
@@ -583,17 +720,20 @@ impl<'a> Resolver<'a> {
             ExprData::ListExpr { list, .. } => {
                 // [x, y, z] = ...
                 if is_augmented {
-                    self.errorf(
-                        lhs.span.start,
-                        "can't use list expression in augmented assignment".to_string(),
-                    )
+                    self.push_error(ResolveError::CannotUseListinAugmentedAssign {
+                        path: self.path_string(),
+                        pos: lhs.span.start,
+                    })
                 }
                 for elem in list {
                     self.assign(env, elem, is_augmented)
                 }
             }
             ExprData::ParenExpr { x, .. } => self.assign(env, x, is_augmented),
-            _ => self.errorf(lhs.span.start, format!("can't assign to {}", lhs.data)),
+            _ => self.push_error(ResolveError::CannotAssign {
+                path: self.path_string(),
+                pos: lhs.span.start,
+            }),
         }
     }
 
@@ -659,8 +799,8 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn errorf(&self, pos: Position, msg: String) {
-        self.errors.borrow_mut().push(Error { pos, msg })
+    fn push_error(&self, e: ResolveError) {
+        self.errors.borrow_mut().push(e)
     }
 
     //fn push(&'a self, b: &'a Block) {
@@ -734,15 +874,13 @@ impl<'a> Resolver<'a> {
             // Assuming !self.options.GlobalReassign
             if ok {
                 if let Some(first) = bind.first {
-                    self.errorf(
-                        id.name_pos,
-                        format!(
-                            "cannot reassign {} {} declared at {:?}",
-                            bind.scope.borrow(),
-                            id.name,
-                            first
-                        ),
-                    )
+                    self.push_error(ResolveError::GlobalReassign {
+                        path: self.path_string(),
+                        pos: id.name_pos,
+                        scope: bind.scope.borrow().clone(),
+                        name: id.name.to_string(),
+                        first: first.name_pos,
+                    })
                 }
             }
             *id.binding.borrow_mut() = Some(bind);
@@ -840,7 +978,7 @@ impl<'a> Resolver<'a> {
             // use of universal name
             /*
             if !self.options.Set && id.name == "set" {
-                //self.errorf(id.name_pos, doesnt+"support sets")
+                //self.push_error(id.name_pos, doesnt+"support sets")
                 panic!("todo")
             }
              */
@@ -861,7 +999,11 @@ impl<'a> Resolver<'a> {
             //if n := self.spellcheck(use); n != "" {
             //	hint = fmt.Sprintf(" (did you mean %s?)", n)
             //}
-            self.errorf(id.name_pos, format!("undefined: {}", id.name /* , hint*/));
+            self.push_error(ResolveError::Undefined {
+                path: self.path_string(),
+                pos: id.name_pos,
+                name: id.name.to_string(),
+            });
             bind
         };
         id.set_binding(&bind);
@@ -1021,7 +1163,10 @@ impl<'a> Resolver<'a> {
                         } => {
                             // **kwargs
                             if seen_kwargs {
-                                self.errorf(pos, "multiple **kwargs not allowed".to_string())
+                                self.push_error(ResolveError::MultipleKeywordArgsNotAllowed {
+                                    path: self.path_string(),
+                                    pos,
+                                })
                             }
                             seen_kwargs = true;
                             self.expr(env, arg)
@@ -1031,9 +1176,15 @@ impl<'a> Resolver<'a> {
                         } => {
                             // *args
                             if seen_kwargs {
-                                self.errorf(pos, "*args may not follow **kwargs".to_string())
+                                self.push_error(ResolveError::ArgsMayNotFollowKeywordArgs {
+                                    path: self.path_string(),
+                                    pos,
+                                });
                             } else if seen_varargs {
-                                self.errorf(pos, "multiple *args not allowed".to_string())
+                                self.push_error(ResolveError::MultipleStarStarArgsNotAllowed {
+                                    path: self.path_string(),
+                                    pos,
+                                });
                             }
                             seen_varargs = true;
                             self.expr(env, arg)
@@ -1051,21 +1202,26 @@ impl<'a> Resolver<'a> {
                             // k=v
                             n += 1;
                             if seen_kwargs {
-                                self.errorf(
-                                    pos,
-                                    "keyword argument may not follow **kwargs".to_string(),
-                                )
+                                self.push_error(
+                                    ResolveError::KeywordArgumentMayNotFollowStarStarKeywordArgs {
+                                        path: self.path_string(),
+                                        pos,
+                                    },
+                                );
                             } else if seen_varargs {
-                                self.errorf(
-                                    pos,
-                                    "keyword argument may not follow *args".to_string(),
-                                )
+                                self.push_error(
+                                    ResolveError::KeywordArgumentMayNotFollowStarKeywordArgs {
+                                        path: self.path_string(),
+                                        pos,
+                                    },
+                                );
                             }
                             if seen_name.contains(id.name) {
-                                self.errorf(
-                                    id.name_pos.clone(),
-                                    format!("keyword argument {} is repeated", id.name),
-                                )
+                                self.push_error(ResolveError::KeywordArgumentIsRepeated {
+                                    path: self.path_string(),
+                                    pos: id.name_pos,
+                                    name: id.name.to_string(),
+                                })
                             } else {
                                 seen_name.insert(id.name);
                             }
@@ -1075,20 +1231,26 @@ impl<'a> Resolver<'a> {
                             // positional argument
                             p += 1;
                             if seen_varargs {
-                                self.errorf(
-                                    pos,
-                                    "positional argument may not follow *args".to_string(),
+                                self.push_error(
+                                    ResolveError::PositionalArgumentMayNotFollowStarArg {
+                                        path: self.path_string(),
+                                        pos,
+                                    },
                                 )
                             } else if seen_kwargs {
-                                self.errorf(
-                                    pos,
-                                    "positional argument may not follow **kwargs".to_string(),
+                                self.push_error(
+                                    ResolveError::PositionalArgumentMayNotFollowStarStarArg {
+                                        path: self.path_string(),
+                                        pos,
+                                    },
                                 )
                             } else if seen_name.len() > 0 {
-                                self.errorf(
-                                    pos,
-                                    "positional argument may not follow named".to_string(),
-                                )
+                                self.push_error(
+                                    ResolveError::PositionalArgumentMayNotFollowNamed {
+                                        path: self.path_string(),
+                                        pos,
+                                    },
+                                );
                             }
                             self.expr(env, arg)
                         }
@@ -1096,16 +1258,18 @@ impl<'a> Resolver<'a> {
 
                     // Fail gracefully if compiler-imposed limit is exceeded.
                     if p >= 256 {
-                        self.errorf(
-                            arg.span.start.clone(),
-                            format!("{} positional arguments in call, limit is 255", p),
-                        );
+                        self.push_error(ResolveError::TooManyPositionalArgumentsInCall {
+                            path: self.path_string(),
+                            pos: arg.span.start,
+                            num: n,
+                        });
                     }
                     if n >= 256 {
-                        self.errorf(
-                            arg.span.start.clone(),
-                            format!("{} keyword arguments in call, limit is 255", n),
-                        );
+                        self.push_error(ResolveError::TooManyKeywordArgumentsInCall {
+                            path: self.path_string(),
+                            pos: arg.span.start,
+                            num: n,
+                        });
                     }
                 }
             }
@@ -1166,38 +1330,45 @@ impl<'a> Resolver<'a> {
                 ExprData::Ident(p) => {
                     // e.g. x
                     if let Some(star_star) = star_star {
-                        self.errorf(
-                            p.name_pos.clone(),
-                            format!("required parameter may not follow **{}", star_star.name),
-                        );
+                        self.push_error(ResolveError::RequiredParameterMayNotFollowStarStar {
+                            path: self.path_string(),
+                            pos: p.name_pos,
+                            name: star_star.name.to_string(),
+                        });
                     } else if star.is_some() {
                         num_kwonly_params += 1;
                     } else if seen_optional {
-                        self.errorf(
-                            p.name_pos.clone(),
-                            "required parameter may not follow optional".to_string(),
-                        )
+                        self.push_error(ResolveError::RequiredParameterMayNotFollowOptional {
+                            path: self.path_string(),
+                            pos: p.name_pos,
+                        });
                     }
                     if self.bind(env, p) {
-                        self.errorf(
-                            p.name_pos.clone(),
-                            format!("duplicate parameter: {}", p.name),
-                        )
+                        self.push_error(ResolveError::DuplicateParameter {
+                            path: self.path_string(),
+                            pos: p.name_pos,
+                            name: p.name.to_string(),
+                        });
                     }
                 }
                 ExprData::BinaryExpr { x, op_pos, .. } => {
                     // e.g. y=dflt
                     if let Some(star_star) = star_star {
-                        self.errorf(
-                            op_pos.clone(),
-                            format!("optional parameter may not follow **{}", star_star.name),
-                        )
+                        self.push_error(ResolveError::OptionalParameterMayNotFollowStarStar {
+                            path: self.path_string(),
+                            pos: *op_pos,
+                            name: star_star.name.to_string(),
+                        });
                     } else if star.is_some() {
                         num_kwonly_params += 1
                     }
                     if let ExprData::Ident(id) = x.data {
                         if self.bind(env, id) {
-                            self.errorf(op_pos.clone(), format!("duplicate parameter: {}", id.name))
+                            self.push_error(ResolveError::DuplicateParameter {
+                                path: self.path_string(),
+                                pos: *op_pos,
+                                name: id.name.to_string(),
+                            });
                         }
                     }
                     seen_optional = true
@@ -1206,24 +1377,25 @@ impl<'a> Resolver<'a> {
                     // * or *args or **kwargs
                     if *op == Token::Star {
                         if let Some(star_star) = star_star {
-                            self.errorf(
-                                op_pos.clone(),
-                                format!("* parameter may not follow **{}", star_star.name),
-                            )
+                            self.push_error(ResolveError::StarMayNotFollowStarStart {
+                                path: self.path_string(),
+                                pos: *op_pos,
+                                name: star_star.name.to_string(),
+                            });
                         } else if star.is_some() {
-                            self.errorf(
-                                op_pos.clone(),
-                                "multiple * parameters not allowed".to_string(),
-                            )
+                            self.push_error(ResolveError::MultipleStarParametersNotAllowed {
+                                path: self.path_string(),
+                                pos: *op_pos,
+                            });
                         } else {
                             star = Some(param)
                         }
                     } else {
                         if star_star.is_some() {
-                            self.errorf(
-                                op_pos.clone(),
-                                "multiple ** parameters not allowed".to_string(),
-                            )
+                            self.push_error(ResolveError::MultipleStarStarParametersNotAllowed {
+                                path: self.path_string(),
+                                pos: *op_pos,
+                            })
                         }
                         if let Some(ExprData::Ident(x)) = x.map(|x| &x.data) {
                             star_star = Some(x)
@@ -1245,25 +1417,27 @@ impl<'a> Resolver<'a> {
             if let ExprData::Ident(id) = star.data {
                 // *args
                 if self.bind(env, id) {
-                    self.errorf(
-                        id.name_pos.clone(),
-                        format!("duplicate parameter: {}", id.name),
-                    )
+                    self.push_error(ResolveError::DuplicateParameter {
+                        path: self.path_string(),
+                        pos: id.name_pos,
+                        name: id.name.to_string(),
+                    });
                 }
                 *function.has_varargs.borrow_mut() = true
             } else if num_kwonly_params == 0 {
-                self.errorf(
-                    star.span.start.clone(),
-                    "bare * must be followed by keyword-only parameters".to_string(),
-                )
+                self.push_error(ResolveError::StarMustBeFollowedByKeywordOnlyParameters {
+                    path: self.path_string(),
+                    pos: star.span.start.clone(),
+                });
             }
         }
         if let Some(star_star) = star_star {
             if self.bind(env, star_star) {
-                self.errorf(
-                    star_star.name_pos.clone(),
-                    format!("duplicate parameter: {}", star_star.name),
-                )
+                self.push_error(ResolveError::DuplicateParameter {
+                    path: self.path_string(),
+                    pos: star_star.name_pos,
+                    name: star_star.name.to_string(),
+                });
             }
             *function.has_kwargs.borrow_mut() = true
         }
@@ -1299,11 +1473,12 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, Result};
 
     use crate::{parse, FileUnit, Mode};
     fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
         let file_unit = parse(&bump, input)?;
-        resolve_file(file_unit, &bump, |s| false, |s| false)
+        resolve_file(file_unit, &bump, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
     }
 
     #[test]
@@ -1421,7 +1596,12 @@ def nested():
             panic!("first is None");
         }
         assert_eq!(f.file_unit.stmts.len(), 1);
-        if let StmtData::DefStmt { function: f, .. } = &f.file_unit.stmts[0].data {
+        if let StmtData::DefStmt {
+            function: f,
+            def_pos,
+            ..
+        } = &f.file_unit.stmts[0].data
+        {
             if let Some(f) = f.borrow().as_ref() {
                 let locals = &f.locals.borrow();
                 assert_eq!(locals.len(), 2);
