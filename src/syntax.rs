@@ -17,7 +17,7 @@ use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 use num_bigint::BigInt;
 
 use crate::{
-    binding::{Binding, Function},
+    binding::Binding,
     quote::{quote, quote_bytes},
     scan::{Comment, Position},
     token::Token,
@@ -79,7 +79,7 @@ pub enum StmtData<'a> {
         params: &'a [ExprRef<'a>],
         rparen: Position,
         body: &'a [StmtRef<'a>],
-        function: RefCell<Option<&'a Function<'a>>>,
+        function: RefCell<Option<usize>>,
     },
     ExprStmt {
         x: ExprRef<'a>,
@@ -382,8 +382,8 @@ pub enum ExprData<'a> {
         params: &'a [ExprRef<'a>],
         body: ExprRef<'a>,
 
-        // Filled in by resolver.
-        function: RefCell<Option<&'a Function<'a>>>,
+        // Name resolution fills in the index of a resolver::Function
+        function: RefCell<Option<usize>>,
     },
     ListExpr {
         lbrack: Position,
@@ -706,7 +706,7 @@ pub struct Ident<'a> {
     pub name_pos: Position,
     pub name: &'a str,
 
-    // Filled in by resolver.
+    // Name resolution links this to a resolver::Binding
     pub binding: RefCell<Option<Rc<Binding<'a>>>>,
 }
 

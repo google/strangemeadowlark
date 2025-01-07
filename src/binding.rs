@@ -47,11 +47,11 @@ impl<'a> Binding<'a> {
 }
 
 // A Module contains resolver information about a file.
-// The resolver populates the Module field of each syntax.File.
 #[derive(Debug, PartialEq)]
 pub struct Module<'a> {
     pub locals: Vec<Rc<Binding<'a>>>, // the file's (comprehension-)local variables
     pub globals: Vec<Rc<Binding<'a>>>, // the file's global variables
+    pub functions: Vec<Function<'a>>,
 }
 
 #[derive(Debug, PartialEq)]

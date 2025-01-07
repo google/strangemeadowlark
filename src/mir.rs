@@ -20,7 +20,7 @@ use std::fmt::Display;
 use crate::scan::Position;
 use crate::value::{StarlarkType, Value};
 
-use crate::binding::Function;
+use crate::binding::Module;
 use crate::{ExprData, ExprRef, Ident, Literal, StmtRef, Token};
 
 use bumpalo::Bump;
@@ -137,21 +137,23 @@ impl<'a> std::fmt::Debug for LocalDef<'a> {
     }
 }
 
-pub struct MirBuilder<'a> {
+pub struct MirBuilder<'a, 'module> {
     bump: &'a Bump,
+    module: &'module Module<'a>,
     locals: Vec<LocalDef<'a>>,
     blocks: Vec<BlockData>,
-    nested: Vec<Box<MirBuilder<'a>>>,
+    nested: Vec<Box<MirBuilder<'a, 'module>>>,
     current: Block,
     loop_break: Vec<Block>,
     loop_continue: Vec<Block>,
 }
 
-impl<'a> MirBuilder<'a> {
-    fn new(bump: &'a Bump) -> Self {
+impl<'a, 'module> MirBuilder<'a, 'module> {
+    fn new(bump: &'a Bump, module: &'module Module<'a>) -> Self {
         let b = BlockData::new();
         MirBuilder {
             bump,
+            module,
             locals: vec![],
             blocks: vec![b],
             nested: vec![],
@@ -161,8 +163,9 @@ impl<'a> MirBuilder<'a> {
         }
     }
 
-    fn new_nested(&mut self) -> &mut MirBuilder<'a> {
-        self.nested.push(Box::new(Self::new(&self.bump)));
+    fn new_nested(&mut self) -> &mut MirBuilder<'a, 'module> {
+        self.nested
+            .push(Box::new(Self::new(&self.bump, self.module)));
         self.nested.last_mut().unwrap()
     }
 
@@ -445,7 +448,8 @@ impl<'a> MirBuilder<'a> {
         self.blocks[self.current.0].terminator = t;
     }
 
-    fn build_mir(&mut self, func: &'a Function<'a>) {
+    fn build_mir(&mut self, func: usize) {
+        let func = &self.module.functions[func];
         // Set up LOCAL_RETURN.
         self.locals.push(LocalDef { name: None });
 
@@ -938,7 +942,7 @@ mod tests {
     use super::*;
     use anyhow::{anyhow, Result};
 
-    fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<&'a FileUnitWithModule<'a>> {
+    fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<FileUnitWithModule<'a>> {
         let file_unit = parse(&bump, input)?;
         resolve_file(file_unit, &bump, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
     }
@@ -946,11 +950,11 @@ mod tests {
     #[test]
     fn test_empty() -> Result<()> {
         let bump = Bump::new();
-        let module = prepare(&bump, "def foo():\n  return\n")?;
-        assert_eq!(module.file_unit.stmts.len(), 1);
-        match &module.file_unit.stmts[0].data {
+        let fm = prepare(&bump, "def foo():\n  return\n")?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump);
+                let mut builder = MirBuilder::new(&bump, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
 
                 assert_eq!(builder.blocks.len(), 1);
@@ -969,11 +973,11 @@ mod tests {
     #[test]
     fn test_basic() -> Result<()> {
         let bump = Bump::new();
-        let module = prepare(&bump, "def foo(x):\n  return x + 2\n")?;
-        assert_eq!(module.file_unit.stmts.len(), 1);
-        match &module.file_unit.stmts[0].data {
+        let fm = prepare(&bump, "def foo(x):\n  return x + 2\n")?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump);
+                let mut builder = MirBuilder::new(&bump, &fm.module);
 
                 builder.build_mir(f.borrow().unwrap());
 
@@ -1007,7 +1011,7 @@ mod tests {
     #[test]
     fn test_body() -> Result<()> {
         let bump = Bump::new();
-        let module = prepare(
+        let fm = prepare(
             &bump,
             "
 def fib(n):
@@ -1026,10 +1030,10 @@ def fib(n):
   return y
 ",
         )?;
-        assert_eq!(module.file_unit.stmts.len(), 1);
-        match &module.file_unit.stmts[0].data {
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump);
+                let mut builder = MirBuilder::new(&bump, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
                 assert_eq!(lowered.run(&[Value::Int(4)]), Value::Int(5));
@@ -1043,11 +1047,11 @@ def fib(n):
     #[test]
     fn test_and_sanity() -> Result<()> {
         let bump = Bump::new();
-        let module = prepare(&bump, "def fooand(x, y):\n  return x and y\n")?;
-        assert_eq!(module.file_unit.stmts.len(), 1);
-        match &module.file_unit.stmts[0].data {
+        let fm = prepare(&bump, "def fooand(x, y):\n  return x and y\n")?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump);
+                let mut builder = MirBuilder::new(&bump, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
@@ -1077,11 +1081,11 @@ def fib(n):
     #[test]
     fn test_and_shortcut() -> Result<()> {
         let bump = Bump::new();
-        let module = prepare(&bump, "def fooshort(x):\n  return x and 1/0\n")?;
-        assert_eq!(module.file_unit.stmts.len(), 1);
-        match &module.file_unit.stmts[0].data {
+        let fm = prepare(&bump, "def fooshort(x):\n  return x and 1/0\n")?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump);
+                let mut builder = MirBuilder::new(&bump, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 

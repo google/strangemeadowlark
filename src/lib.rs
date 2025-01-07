@@ -15,7 +15,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-mod binding;
+pub mod binding;
 mod mir;
 mod parse;
 mod print;
