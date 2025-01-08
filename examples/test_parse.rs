@@ -24,15 +24,14 @@ fn main() -> Result<()> {
     }
 
     let path = env::args().into_iter().nth(1).unwrap();
-
     let src = read_to_string(&path)?;
     let bump = Bump::new();
     let unit = parse_with_mode(&bump, &path, &src, Mode::RetainComments)?;
-    resolve_file(unit, &bump, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
+    let _fm = resolve_file(unit, &bump, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
+
     for stmt in unit.stmts {
         println!("{}", stmt.data);
     }
-
     let mut buf = String::new();
     let mut printer = Printer::new(unit, &mut buf);
     printer.print_file_unit()?;

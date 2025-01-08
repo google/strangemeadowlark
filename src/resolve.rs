@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::binding::{Binding, Function, Module, Scope};
+use crate::binding::{Binding, BindingIndex, Function, Module, Scope};
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
@@ -270,6 +270,7 @@ pub fn repl_chunk<'a>(
             locals: r.module_locals.take(),
             globals: r.module_globals.take(),
             functions: r.functions.take(),
+            bindings: r.bindings.take(),
         },
     })
 }
@@ -290,10 +291,10 @@ pub struct Block<'a> {
     function: Option<usize>, // only for function blocks, index into functions
     comp: Option<&'a ExprData<'a>>, // only for comprehension blocks
 
-    // bindings maps a name to its binding.
+    // bindings maps a name to its binding (which are all stored in the module).
     // A local binding has an index into its innermost enclosing container's locals array.
     // A free binding has an index into its innermost enclosing function's freevars array.
-    bindings: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
+    bindings: RefCell<HashMap<&'a str, BindingIndex>>,
 
     // children records the child blocks of the current one.
     children: RefCell<Vec<usize>>,
@@ -340,8 +341,8 @@ impl<'a> Block<'a> {
         }
     }
 
-    fn bind(&self, name: &'a str, bind: Rc<Binding<'a>>) {
-        self.bindings.borrow_mut().insert(name, bind.clone());
+    fn bind(&self, name: &'a str, bindx: BindingIndex) {
+        self.bindings.borrow_mut().insert(name, bindx);
     }
 }
 
@@ -350,16 +351,17 @@ pub struct Resolver<'a> {
     path: &'a Path,
     // file = blocks[0]
     blocks: Vec<Block<'a>>,
+    bindings: RefCell<Vec<Binding<'a>>>,
     // moduleLocals contains the local variables of the module
     // (due to load statements and comprehensions outside any function).
     // moduleGlobals contains the global variables of the module.
-    module_locals: RefCell<Vec<Rc<Binding<'a>>>>,
-    module_globals: RefCell<Vec<Rc<Binding<'a>>>>,
+    module_locals: RefCell<Vec<BindingIndex>>,
+    module_globals: RefCell<Vec<BindingIndex>>,
     functions: RefCell<Vec<Function<'a>>>,
     // globals maps each global name in the module to its binding.
     // predeclared does the same for predeclared and universal names.
-    globals: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
-    predeclared: RefCell<HashMap<&'a str, Rc<Binding<'a>>>>,
+    globals: RefCell<HashMap<&'a str, BindingIndex>>,
+    predeclared: RefCell<HashMap<&'a str, BindingIndex>>,
 
     // These predicates report whether a name is
     // pre-declared, either in this module or universally,
@@ -387,6 +389,7 @@ impl<'resolve, 'a> Resolver<'a> {
             bump,
             path,
             blocks: vec![Block::new_file()],
+            bindings: RefCell::new(vec![]),
             is_global,
             is_predeclared,
             is_universal,
@@ -416,6 +419,32 @@ impl<'resolve, 'a> Resolver<'a> {
         &self.blocks[index]
     }
 
+    fn new_binding(&self, b: Binding<'a>) -> BindingIndex {
+        let index = self.bindings.borrow().len();
+        self.bindings.borrow_mut().push(b);
+        BindingIndex(index)
+    }
+
+    fn push_module_local(&self, id: &'a Ident<'a>) -> BindingIndex {
+        let bindx = self.new_binding(Binding {
+            first: Some(id),
+            scope: RefCell::new(Scope::Local),
+            index: self.module_locals.borrow().len() as _,
+        });
+        self.module_locals.borrow_mut().push(bindx);
+        bindx
+    }
+
+    fn push_module_global(&self, id: &'a Ident<'a>) -> BindingIndex {
+        let bindx = self.new_binding(Binding {
+            first: Some(id),
+            scope: RefCell::new(Scope::Global),
+            index: self.module_globals.borrow().len() as _,
+        });
+        self.module_globals.borrow_mut().push(bindx);
+        bindx
+    }
+
     // resolveLocalUses is called when leaving a container (function/module)
     // block.  It resolves all uses of locals/cells within that block.
     fn resolve_local_uses(&mut self, index: usize) {
@@ -423,8 +452,13 @@ impl<'resolve, 'a> Resolver<'a> {
         let mut unresolved: Vec<Use<'a>> = vec![];
         for u in b.uses.borrow_mut().drain(..) {
             match self.lookup_local(&u) {
-                Some(bind) if matches!(bind.get_scope(), Scope::Local | Scope::Cell) => {
-                    u.id.set_binding(&bind)
+                Some(bindx) => {
+                    let bind = &self.bindings.borrow()[bindx.0];
+                    if matches!(bind.get_scope(), Scope::Local | Scope::Cell) {
+                        u.id.set_binding(bindx)
+                    } else {
+                        unresolved.push(u)
+                    }
                 }
                 _ => unresolved.push(u),
             }
@@ -433,12 +467,13 @@ impl<'resolve, 'a> Resolver<'a> {
     }
 
     // lookupLocal looks up an identifier within its immediately enclosing function.
-    fn lookup_local<'b>(&self, u: &'b Use) -> Option<Rc<Binding<'a>>> {
+    fn lookup_local<'b>(&self, u: &'b Use) -> Option<BindingIndex> {
         let mut env = u.env;
         let mut b = self.block(env);
         loop {
             match b.bindings.borrow().get(u.id.name) {
-                Some(bind) => {
+                Some(bindx) => {
+                    let bind = &self.bindings.borrow()[bindx.0];
                     if bind.get_scope() == Scope::Free {
                         // shouldn't exist till later
                         panic!(
@@ -446,7 +481,7 @@ impl<'resolve, 'a> Resolver<'a> {
                             u.id.name_pos, u.id.name, bind
                         )
                     }
-                    return Some(bind.clone());
+                    return Some(*bindx);
                 }
                 _ => {}
             }
@@ -467,7 +502,8 @@ impl<'resolve, 'a> Resolver<'a> {
 
     // lookup_lexical looks up an identifier use.id within its lexically enclosing environment.
     // The use.env field captures the original environment for error reporting.
-    fn lookup_lexical(&self, u: Use<'a>, env: usize) -> Rc<Binding<'a>> {
+    // This function can update scope as a side-effect.
+    fn lookup_lexical(&self, u: Use<'a>, env: usize) -> BindingIndex {
         if DEBUG {
             println!("lookupLexical {} in {:?} = ...", u.id.name, env);
         }
@@ -483,54 +519,55 @@ impl<'resolve, 'a> Resolver<'a> {
         // Defined in this block?
         let b = self.block(env);
         let mut memoize = false;
-        let bind = match b.bindings.borrow().get(u.id.name) {
-            Some(bind) => bind.clone(),
-            None => {
-                let parent = b.parent;
-                // Defined in parent block?
-                let mut bind = self.lookup_lexical(u, parent);
-                match &b.function {
-                    Some(fun_index)
-                        if matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell) =>
-                    {
-                        let function = &self.functions.borrow()[*fun_index];
-                        // Found in parent block, which belongs to enclosing function.
-                        // Add the parent's binding to the function's freevars,
-                        // and add a new 'free' binding to the inner function's block,
-                        // and turn the parent's local into cell.
-                        if bind.get_scope() == Scope::Local {
-                            bind.set_scope(Scope::Cell)
-                        }
-                        let index: u8 = function.push_free_var(&bind);
-                        bind = Rc::new(Binding {
-                            first: bind.first,
-                            scope: RefCell::new(Scope::Free),
-                            index,
-                        });
-                        if DEBUG {
-                            println!(
-                                "creating freevar {} in function at {}: {}\n",
-                                index + 1,
-                                function.pos,
-                                u.id.name
-                            )
-                        }
-                    }
-                    _ => {}
-                }
-                memoize = true;
-                bind
-            }
-        };
-        if memoize {
-            // Memoize, to avoid duplicate free vars
-            // and redundant global (failing) lookups.
-            b.bind(u.id.name, bind.clone());
-            if DEBUG {
-                println!("= {:?}\n", bind);
-            }
+
+        match b.bindings.borrow().get(u.id.name) {
+            Some(bindx) => return *bindx,
+            _ => {}
         }
-        bind
+
+        // Defined in parent block?
+        let mut bindx = self.lookup_lexical(u, b.parent);
+        let mut binding_to_add: Option<Binding> = None;
+        {
+            let bind = &self.bindings.borrow()[bindx.0];
+            if let Some(fun_index) = b.function {
+                if matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell) {
+                    let function = &self.functions.borrow()[fun_index];
+                    // Found in parent block, which belongs to enclosing function.
+                    // Add the parent's binding to the function's freevars,
+                    // and add a new 'free' binding to the inner function's block,
+                    // and turn the parent's local into cell.
+                    if bind.get_scope() == Scope::Local {
+                        bind.set_scope(Scope::Cell)
+                    }
+                    let index: u8 = function.push_free_var(bindx);
+                    if DEBUG {
+                        println!(
+                            "creating freevar {} in function at {}: {}\n",
+                            index + 1,
+                            function.pos,
+                            u.id.name
+                        )
+                    }
+                    binding_to_add = Some(Binding {
+                        first: bind.first.clone(),
+                        scope: RefCell::new(Scope::Free),
+                        index,
+                    });
+                }
+            };
+        }
+        if let Some(bind) = binding_to_add {
+            bindx = self.new_binding(bind)
+        }
+        // Memoize, to avoid duplicate free vars
+        // and redundant global (failing) lookups.
+        b.bind(u.id.name, bindx);
+        if DEBUG {
+            println!("= {:?}\n", &self.bindings.borrow()[bindx.0]);
+        }
+
+        bindx
     }
 
     fn stmts(&mut self, env: usize, stmts: &'a [StmtRef<'a>]) {
@@ -788,40 +825,31 @@ impl<'resolve, 'a> Resolver<'a> {
         // Binding outside any local (comprehension/function) block?
         if env == FILE_BLOCK {
             let file = self.block(FILE_BLOCK);
-            let (mut bind, ok) = match file.bindings.borrow_mut().get(id.name) {
+            let (mut bindx, ok) = match file.bindings.borrow_mut().get(id.name) {
                 None => match self.globals.borrow_mut().entry(id.name) {
                     Entry::Vacant(e) => {
                         // first global binding of this name
-                        let bind = Rc::new(Binding {
-                            first: Some(id),
-                            scope: RefCell::new(Scope::Global),
-                            index: self.module_globals.borrow().len() as _,
-                        });
-                        e.insert(Rc::clone(&bind));
-                        self.module_globals.borrow_mut().push(Rc::clone(&bind));
-                        (bind, false)
+                        let bindx = self.push_module_global(id);
+                        e.insert(bindx);
+                        (bindx, false)
                     }
                     Entry::Occupied(e) => (e.get().clone(), true),
                 },
-                Some(bind) => (bind.clone(), true),
+                Some(bindx) => (*bindx, true),
             };
             if !ok {
                 match self.globals.borrow_mut().entry(id.name) {
                     Entry::Vacant(e) => {
                         // first global binding of this name
-                        bind = Rc::new(Binding {
-                            first: Some(id),
-                            scope: RefCell::new(Scope::Global),
-                            index: self.module_globals.borrow().len() as _,
-                        });
-                        e.insert(Rc::clone(&bind));
-                        self.module_globals.borrow_mut().push(Rc::clone(&bind));
+                        bindx = self.push_module_global(id);
+                        e.insert(bindx);
                     }
                     _ => {}
                 }
             }
             // Assuming !self.options.GlobalReassign
             if ok {
+                let bind = &self.bindings.borrow()[bindx.0];
                 if let Some(first) = bind.first {
                     self.push_error(ResolveError::GlobalReassign {
                         path: self.path_string(),
@@ -832,7 +860,7 @@ impl<'resolve, 'a> Resolver<'a> {
                     })
                 }
             }
-            *id.binding.borrow_mut() = Some(bind);
+            *id.binding.borrow_mut() = Some(bindx);
             return ok;
         }
 
@@ -848,21 +876,16 @@ impl<'resolve, 'a> Resolver<'a> {
         if !ok {
             if let Some(fun_index) = &self.container(env).function {
                 let fun = &self.functions.borrow()[*fun_index];
-                let bind = Rc::new(Binding {
-                    first: Some(id),
-                    scope: RefCell::new(Scope::Local),
-                    index: fun.locals.borrow().len() as _,
+                let bindx = fun.new_local(id, &mut |id, index| {
+                    self.new_binding(Binding {
+                        first: Some(id),
+                        scope: RefCell::new(Scope::Local),
+                        index: index as u8,
+                    })
                 });
-                b.bind(id.name, Rc::clone(&bind));
-                fun.locals.borrow_mut().push(bind);
+                b.bind(id.name, bindx);
             } else {
-                let bind = Rc::new(Binding {
-                    first: Some(id),
-                    scope: RefCell::new(Scope::Local),
-                    index: self.module_locals.borrow().len() as _,
-                });
-                b.bind(id.name, Rc::clone(&bind));
-                self.module_locals.borrow_mut().push(bind);
+                b.bind(id.name, self.push_module_local(id));
             }
         }
 
@@ -878,7 +901,7 @@ impl<'resolve, 'a> Resolver<'a> {
 
     // use_top_level resolves u.id as a reference to a name visible at top-level.
     // The u.env field captures the original environment for error reporting.
-    fn use_top_level(&self, u: Use<'a>) -> Rc<Binding<'a>> {
+    fn use_top_level(&self, u: Use<'a>) -> BindingIndex {
         let is_global = if let Some(is_global) = self.is_global {
             is_global
         } else {
@@ -886,35 +909,31 @@ impl<'resolve, 'a> Resolver<'a> {
         };
         let id = u.id;
 
-        let bind: Rc<Binding> =
+        let bindx: BindingIndex =
             if let Some(prev) = self.block(FILE_BLOCK).bindings.borrow().get(id.name) {
                 // use of load-defined name in file block
-                Rc::clone(prev)
+                *prev
             } else if let Some(prev) = self.globals.borrow().get(id.name) {
                 // use of global declared by module
-                return prev.clone();
+                return *prev;
             } else if is_global(id.name) {
                 // use of global defined in a previous REPL chunk
-                let bind = Rc::new(Binding {
-                    first: Some(id), // wrong: this is not even a binding use
-                    scope: RefCell::new(Scope::Global),
-                    index: self.module_globals.borrow().len().try_into().unwrap(),
-                });
-                self.globals.borrow_mut().insert(id.name, bind.clone());
-                self.module_globals.borrow_mut().push(bind.clone());
-                bind
+                // setting ".first" is wrong: this is not even a binding use
+                let bindx = self.push_module_global(id);
+                self.globals.borrow_mut().insert(id.name, bindx);
+                bindx
             } else if let Some(prev) = self.predeclared.borrow().get(id.name) {
                 // repeated use of predeclared or universal
                 prev.clone()
             } else if (self.is_predeclared)(id.name) {
                 // use of pre-declared name
-                let bind = Rc::new(Binding {
+                let bindx = self.new_binding(Binding {
                     scope: RefCell::new(Scope::Predeclared),
                     index: 0,
                     first: None,
                 });
-                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
-                bind
+                self.predeclared.borrow_mut().insert(id.name, bindx); // save it
+                bindx
             } else if (self.is_universal)(id.name) {
                 // use of universal name
                 /*
@@ -923,15 +942,15 @@ impl<'resolve, 'a> Resolver<'a> {
                     panic!("todo")
                 }
                  */
-                let bind = Rc::new(Binding {
+                let bindx = self.new_binding(Binding {
                     scope: RefCell::new(Scope::Universal),
                     index: 0,
                     first: None,
                 });
-                self.predeclared.borrow_mut().insert(id.name, bind.clone()); // save it
-                bind
+                self.predeclared.borrow_mut().insert(id.name, bindx); // save it
+                bindx
             } else {
-                let bind = Rc::new(Binding {
+                let bindx = self.new_binding(Binding {
                     scope: RefCell::new(Scope::Undefined),
                     index: 0,
                     first: None,
@@ -941,10 +960,10 @@ impl<'resolve, 'a> Resolver<'a> {
                     pos: id.name_pos,
                     name: id.name.to_string(),
                 });
-                bind
+                bindx
             };
-        id.set_binding(&bind);
-        return bind;
+        id.set_binding(bindx);
+        return bindx;
     }
 
     fn expr(&mut self, env: usize, e: ExprRef<'a>) {
@@ -1382,7 +1401,7 @@ impl<'resolve, 'a> Resolver<'a> {
         }
         let uses = b.uses.borrow();
         for u in uses.iter().copied() {
-            u.id.set_binding(&self.lookup_lexical(u, u.env))
+            u.id.set_binding(self.lookup_lexical(u, u.env))
         }
     }
 } // impl
@@ -1405,7 +1424,8 @@ mod tests {
         let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.globals.len(), 1);
-        let b = &f.module.globals[0];
+        let bx = f.module.globals[0];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
         if let Some(id) = b.first {
@@ -1438,7 +1458,8 @@ mod tests {
         let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.globals.len(), 2);
-        let b = &f.module.globals[0];
+        let bx = f.module.globals[0];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
         if let Some(id) = b.first {
@@ -1446,7 +1467,8 @@ mod tests {
         } else {
             panic!("first is None");
         }
-        let b = &f.module.globals[1];
+        let bx = &f.module.globals[1];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 1);
         if let Some(id) = b.first {
@@ -1464,7 +1486,8 @@ mod tests {
         let f = prepare(&bump, input)?;
 
         assert_eq!(f.module.locals.len(), 3);
-        let b = &f.module.locals[0];
+        let bx = f.module.locals[0];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 0);
         if let Some(id) = b.first {
@@ -1472,7 +1495,8 @@ mod tests {
         } else {
             panic!("first is None");
         }
-        let b = &f.module.locals[1];
+        let bx = f.module.locals[1];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 1);
         if let Some(id) = b.first {
@@ -1480,7 +1504,8 @@ mod tests {
         } else {
             panic!("first is None");
         }
-        let b = &f.module.locals[2];
+        let bx = f.module.locals[2];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 2);
         if let Some(id) = b.first {
@@ -1504,7 +1529,8 @@ def nested():
 ";
         let f = prepare(&bump, input)?;
         assert_eq!(f.module.globals.len(), 1);
-        let b = &f.module.globals[0];
+        let bx = &f.module.globals[0];
+        let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
         if let Some(id) = b.first {
@@ -1521,8 +1547,10 @@ def nested():
                 let fun = &f.module.functions[fun_index];
                 let locals = &fun.locals.borrow();
                 assert_eq!(locals.len(), 2);
-                assert!(matches!(locals[0].first, Some(Ident { name: "f", .. })));
-                assert!(matches!(locals[1].first, Some(Ident { name: "e", .. })));
+                let local_first = &f.module.bindings[locals[0].0];
+                assert!(matches!(local_first.first, Some(Ident { name: "f", .. })));
+                let local_second = &f.module.bindings[locals[1].0];
+                assert!(matches!(local_second.first, Some(Ident { name: "e", .. })));
                 Ok(())
             } else {
                 Err(anyhow!("function not resolved"))
@@ -1583,6 +1611,21 @@ def spec_says_fails_at_runtime(n):
     i = i + 1
   return i
 ";
+        let f = prepare(&bump, input)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_reference_local() -> Result<()> {
+        let bump = Bump::new();
+        let input = r#"
+load("foo.scl", "foo")
+
+def bar(x):
+  foo(foo(x))
+
+y = bar(1)
+"#;
         let f = prepare(&bump, input)?;
         Ok(())
     }

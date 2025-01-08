@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use crate::scan::Position;
 use crate::syntax::{Expr, Stmt};
@@ -46,12 +45,17 @@ impl<'a> Binding<'a> {
     }
 }
 
+// Reference
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct BindingIndex(pub usize);
+
 // A Module contains resolver information about a file.
 #[derive(Debug, PartialEq)]
 pub struct Module<'a> {
-    pub locals: Vec<Rc<Binding<'a>>>, // the file's (comprehension-)local variables
-    pub globals: Vec<Rc<Binding<'a>>>, // the file's global variables
+    pub locals: Vec<BindingIndex>, // the file's (comprehension-)local variables
+    pub globals: Vec<BindingIndex>, // the file's global variables
     pub functions: Vec<Function<'a>>,
+    pub bindings: Vec<Binding<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,15 +70,25 @@ pub struct Function<'a> {
     pub has_varargs: RefCell<bool>, // whether params includes *args (convenience)
     pub has_kwargs: RefCell<bool>,  // whether params includes **kwargs (convenience)
     pub num_kwonly_params: RefCell<u8>, // number of keyword-only optional parameters
-    pub locals: RefCell<Vec<Rc<Binding<'a>>>>, // this function's local/cell variables, parameters first
-    pub free_vars: RefCell<Vec<Rc<Binding<'a>>>>, // enclosing cells to capture in closure
+    pub locals: RefCell<Vec<BindingIndex>>, // this function's local/cell variables, parameters first
+    pub free_vars: RefCell<Vec<BindingIndex>>, // enclosing cells to capture in closure
 }
 
 impl<'a> Function<'a> {
-    pub fn push_free_var(&self, v: &Rc<Binding<'a>>) -> u8 {
+    pub fn push_free_var(&self, v: BindingIndex) -> u8 {
         let mut vs = self.free_vars.borrow_mut();
         let index: u8 = vs.len().try_into().unwrap();
-        vs.push(v.clone());
+        vs.push(v);
         index
+    }
+
+    pub fn new_local(
+        &self,
+        id: &'a Ident<'a>,
+        mk_binding: &mut dyn Fn(&'a Ident<'a>, usize) -> BindingIndex,
+    ) -> BindingIndex {
+        let v = mk_binding(id, self.locals.borrow().len());
+        self.locals.borrow_mut().push(v);
+        v
     }
 }

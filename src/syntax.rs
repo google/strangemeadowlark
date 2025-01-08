@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
+use std::{cell::RefCell, fmt::Display, path::Path};
 
 use num_bigint::BigInt;
 
 use crate::{
-    binding::Binding,
+    binding::BindingIndex,
     quote::{quote, quote_bytes},
     scan::{Comment, Position},
     token::Token,
@@ -706,8 +706,8 @@ pub struct Ident<'a> {
     pub name_pos: Position,
     pub name: &'a str,
 
-    // Name resolution links this to a resolver::Binding
-    pub binding: RefCell<Option<Rc<Binding<'a>>>>,
+    // Name resolution fills in this index of a resolver::Binding
+    pub binding: RefCell<Option<BindingIndex>>,
 }
 
 impl<'a> std::fmt::Debug for Ident<'a> {
@@ -738,15 +738,15 @@ impl<'a> Ident<'a> {
         }
     }
 
-    pub fn set_binding(&self, binding: &Rc<Binding<'a>>) {
+    pub fn set_binding(&self, binding: BindingIndex) {
         let mut b = self.binding.borrow_mut();
-        *b = Some(binding.clone())
+        *b = Some(binding)
     }
 
     /// Retrieves the binding for this ident.
     /// Panics if the binding is not set.
-    pub fn binding(&self) -> Option<Rc<Binding<'a>>> {
-        self.binding.borrow().clone()
+    pub fn binding(&self) -> Option<BindingIndex> {
+        *self.binding.borrow()
     }
 }
 

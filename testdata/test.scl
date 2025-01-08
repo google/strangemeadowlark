@@ -1,0 +1,9 @@
+# Basic test file, Starlark Configuration Language
+load("foo.scl", "foo")
+
+def bar(x):
+  foo(foo(x))
+
+y = bar(1)
+
+

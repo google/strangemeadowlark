@@ -425,7 +425,9 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
     }
 
     fn local(&self, id: &'a Ident<'a>) -> Local {
-        Local(1 + (id.binding.borrow().as_ref().unwrap().index as usize))
+        let b = id.binding.borrow().unwrap();
+        let b = &self.module.bindings[b.0];
+        Local(1 + (b.index as usize))
     }
 
     fn create_local(&mut self, id: &'a Ident<'a>) -> Local {
@@ -454,7 +456,10 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         self.locals.push(LocalDef { name: None });
 
         for local in func.locals.borrow().iter() {
-            self.create_local(local.first.unwrap());
+            let b = &self.module.bindings[local.0];
+            if let Some(id) = b.first.as_ref() {
+                self.create_local(id);
+            }
         }
 
         for stmt in func.body {
@@ -487,6 +492,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         match expr.data {
             ExprData::Ident(id) => {
                 let b = id.binding().unwrap();
+                let b = &self.module.bindings[b.0];
                 let local = Local(1 + (b.index as usize));
                 Place::from_local(local)
             }
