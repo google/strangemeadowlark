@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::cell::RefCell;
 
 use crate::scan::Position;
@@ -36,6 +37,12 @@ pub struct Binding<'a> {
     pub first: Option<&'a Ident<'a>>,
 }
 
+pub const UNDEFINED_BINDING: Binding<'static> = Binding {
+    scope: RefCell::new(Scope::Undefined),
+    index: 0,
+    first: None,
+};
+
 impl<'a> Binding<'a> {
     pub fn get_scope(&self) -> Scope {
         *self.scope.borrow()
@@ -46,7 +53,7 @@ impl<'a> Binding<'a> {
 }
 
 // Reference
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub struct BindingIndex(pub usize);
 
 // A Module contains resolver information about a file.
@@ -56,6 +63,12 @@ pub struct Module<'a> {
     pub globals: Vec<BindingIndex>, // the file's global variables
     pub functions: Vec<Function<'a>>,
     pub bindings: Vec<Binding<'a>>,
+}
+
+impl<'a> Module<'a> {
+    pub fn binding<B: Borrow<BindingIndex>>(&self, b: B) -> &Binding<'a> {
+        &self.bindings[b.borrow().0]
+    }
 }
 
 #[derive(Debug, PartialEq)]

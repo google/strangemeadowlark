@@ -14,9 +14,11 @@
 //	*Function       -- function (implemented in Starlark)
 //	*Builtin        -- builtin_function_or_method (function or method implemented in Go)
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc, sync::Mutex};
 
 use num_bigint::BigInt;
+
+use crate::binding::BindingIndex;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum StarlarkType {
@@ -34,6 +36,13 @@ pub enum StarlarkType {
 }
 
 #[derive(Debug, Clone)]
+pub enum Reference {
+    // Placeholder that only exists teporarily in MIR translation
+    FreeVar(BindingIndex),
+    Local(usize),
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
     None,
     Bool(bool),
@@ -46,16 +55,22 @@ pub enum Value {
     Tuple(Box<[Value]>),
     Dict(HashMap<Value, Value>),
     //Set
-    Function, //Builtin
+    Function {
+        func_index: usize,
+        env: Box<[Rc<Mutex<Value>>]>,
+    }, //Builtin
 
+    Cell(Rc<Mutex<Value>>),
+    // Code pointer
+    FuncRef(usize),
     // Special value used for trap.
     Abort(String),
 }
 
 impl Value {
-    pub const ITERATE: Value = Value::Function;
-    pub const ITERATOR_NEXT: Value = Value::Function;
-    pub const INDEX_GET: Value = Value::Function;
+    pub fn deref(cell: &Rc<Mutex<Value>>) -> Value {
+        cell.lock().unwrap().clone()
+    }
 
     pub fn bool(&self) -> Self {
         Value::Bool(match self {
@@ -72,9 +87,9 @@ impl Value {
             Value::List(l) => l.is_empty(),
             Value::Tuple(t) => t.is_empty(),
             Value::Dict(m) => m.is_empty(),
-            Value::Function => true,
+            Value::Function { .. } => true,
 
-            // Trap
+            Value::FuncRef(_) | Value::Cell(_) => return Value::Abort("cannot happen".to_string()),
             Value::Abort(_) => return self.clone(),
         })
     }
@@ -121,7 +136,7 @@ impl Value {
             (Value::Int(left), Value::Float(right)) => Value::Float(*left as f64 + right),
             (Value::Float(left), Value::Int(right)) => Value::Float(left + *right as f64),
             (Value::Float(left), Value::Float(right)) => Value::Float(left + right),
-            _ => todo!(),
+            _ => todo!("plus {left:?}, {right:?}"),
         }
     }
     pub fn minus(left: &Value, right: &Value) -> Value {

@@ -1,12 +1,13 @@
 #![allow(unused)]
 
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::binding::{Binding, BindingIndex, Function, Module, Scope};
+use crate::binding::{Binding, BindingIndex, Function, Module, Scope, UNDEFINED_BINDING};
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
@@ -503,7 +504,7 @@ impl<'resolve, 'a> Resolver<'a> {
     // lookup_lexical looks up an identifier use.id within its lexically enclosing environment.
     // The use.env field captures the original environment for error reporting.
     // This function can update scope as a side-effect.
-    fn lookup_lexical(&self, u: Use<'a>, env: usize) -> BindingIndex {
+    fn lookup_lexical(&self, u: Use<'a>, env: usize) -> Option<BindingIndex> {
         if DEBUG {
             println!("lookupLexical {} in {:?} = ...", u.id.name, env);
         }
@@ -520,13 +521,17 @@ impl<'resolve, 'a> Resolver<'a> {
         let b = self.block(env);
         let mut memoize = false;
 
-        match b.bindings.borrow().get(u.id.name) {
-            Some(bindx) => return *bindx,
-            _ => {}
+        let bindx = b.bindings.borrow().get(u.id.name).copied();
+        if bindx.is_some() {
+            return bindx;
         }
 
         // Defined in parent block?
-        let mut bindx = self.lookup_lexical(u, b.parent);
+        let bindx = self.lookup_lexical(u, b.parent);
+        if bindx.is_none() {
+            return None;
+        }
+        let mut bindx = bindx.unwrap();
         let mut binding_to_add: Option<Binding> = None;
         {
             let bind = &self.bindings.borrow()[bindx.0];
@@ -567,7 +572,7 @@ impl<'resolve, 'a> Resolver<'a> {
             println!("= {:?}\n", &self.bindings.borrow()[bindx.0]);
         }
 
-        bindx
+        Some(bindx)
     }
 
     fn stmts(&mut self, env: usize, stmts: &'a [StmtRef<'a>]) {
@@ -896,12 +901,13 @@ impl<'resolve, 'a> Resolver<'a> {
     fn r#use(&self, env: usize, id: &'a Ident<'a>) {
         let u = Use { id, env };
         let b = self.container(env);
-        b.uses.borrow_mut().push(u)
+        let uses: &mut Vec<Use> = &mut b.uses.borrow_mut();
+        uses.push(u);
     }
 
     // use_top_level resolves u.id as a reference to a name visible at top-level.
     // The u.env field captures the original environment for error reporting.
-    fn use_top_level(&self, u: Use<'a>) -> BindingIndex {
+    fn use_top_level(&self, u: Use<'a>) -> Option<BindingIndex> {
         let is_global = if let Some(is_global) = self.is_global {
             is_global
         } else {
@@ -915,7 +921,7 @@ impl<'resolve, 'a> Resolver<'a> {
                 *prev
             } else if let Some(prev) = self.globals.borrow().get(id.name) {
                 // use of global declared by module
-                return *prev;
+                return Some(*prev);
             } else if is_global(id.name) {
                 // use of global defined in a previous REPL chunk
                 // setting ".first" is wrong: this is not even a binding use
@@ -924,7 +930,7 @@ impl<'resolve, 'a> Resolver<'a> {
                 bindx
             } else if let Some(prev) = self.predeclared.borrow().get(id.name) {
                 // repeated use of predeclared or universal
-                prev.clone()
+                *prev
             } else if (self.is_predeclared)(id.name) {
                 // use of pre-declared name
                 let bindx = self.new_binding(Binding {
@@ -950,20 +956,17 @@ impl<'resolve, 'a> Resolver<'a> {
                 self.predeclared.borrow_mut().insert(id.name, bindx); // save it
                 bindx
             } else {
-                let bindx = self.new_binding(Binding {
-                    scope: RefCell::new(Scope::Undefined),
-                    index: 0,
-                    first: None,
-                });
+                id.set_binding(self.new_binding(UNDEFINED_BINDING));
                 self.push_error(ResolveError::Undefined {
                     path: self.path_string(),
                     pos: id.name_pos,
                     name: id.name.to_string(),
                 });
-                bindx
+
+                return None;
             };
         id.set_binding(bindx);
-        return bindx;
+        return Some(bindx);
     }
 
     fn expr(&mut self, env: usize, e: ExprRef<'a>) {
@@ -1233,7 +1236,7 @@ impl<'resolve, 'a> Resolver<'a> {
     }
 
     fn function(&mut self, env: usize, fun_index: usize) {
-        let params = {
+        let params: &[&Expr<'a>] = {
             let fun = &self.functions.borrow()[fun_index];
             fun.params
         };
@@ -1401,7 +1404,10 @@ impl<'resolve, 'a> Resolver<'a> {
         }
         let uses = b.uses.borrow();
         for u in uses.iter().copied() {
-            u.id.set_binding(self.lookup_lexical(u, u.env))
+            match self.lookup_lexical(u, u.env) {
+                Some(b) => u.id.set_binding(b),
+                _ => {}
+            }
         }
     }
 } // impl
@@ -1517,14 +1523,16 @@ mod tests {
     }
 
     #[test]
-    fn nested() -> Result<()> {
+    fn nestedvar() -> Result<()> {
         let bump = Bump::new();
         let input = "
-def nested():  
-  def f(d):
-    d[3] = 3
+def nested(x):   # x has Scope::Cell
+  def update(d): # has a freevar x
+    def f(d):    # has a freevar x
+      d[0] = x
+    f(d)
   e = {}
-  f(e)
+  update(e)
   return e
 ";
         let f = prepare(&bump, input)?;
@@ -1540,23 +1548,109 @@ def nested():
         }
         assert_eq!(f.file_unit.stmts.len(), 1);
         if let StmtData::DefStmt {
-            function, def_pos, ..
+            function,
+            def_pos,
+            body,
+            ..
         } = &f.file_unit.stmts[0].data
         {
             if let Some(fun_index) = *function.borrow() {
                 let fun = &f.module.functions[fun_index];
+                assert_eq!(fun.free_vars.borrow().len(), 0);
                 let locals = &fun.locals.borrow();
-                assert_eq!(locals.len(), 2);
-                let local_first = &f.module.bindings[locals[0].0];
-                assert!(matches!(local_first.first, Some(Ident { name: "f", .. })));
-                let local_second = &f.module.bindings[locals[1].0];
-                assert!(matches!(local_second.first, Some(Ident { name: "e", .. })));
-                Ok(())
+                assert_eq!(locals.len(), 3);
+
+                {
+                    let local = &f.module.bindings[locals[0].0];
+                    assert!(matches!(local.first, Some(Ident { name: "x", .. })));
+                    assert_eq!(local.get_scope(), Scope::Cell);
+                }
+                {
+                    let local = &f.module.bindings[locals[1].0];
+                    assert!(matches!(local.first, Some(Ident { name: "update", .. })));
+                    assert_eq!(local.get_scope(), Scope::Local);
+                }
+
+                {
+                    let local = &f.module.bindings[locals[2].0];
+                    assert!(matches!(local.first, Some(Ident { name: "e", .. })));
+                    assert_eq!(local.get_scope(), Scope::Local);
+                }
+
+                assert!(body.len() > 0);
+                if let StmtData::DefStmt {
+                    function,
+                    def_pos,
+                    body,
+                    ..
+                } = &body[0].data
+                {
+                    if let Some(fun_index) = *function.borrow() {
+                        let fun = &f.module.functions[fun_index];
+
+                        assert_eq!(fun.free_vars.borrow().len(), 1);
+                        let bindx = fun.free_vars.borrow()[0];
+                        let bind = &f.module.bindings[bindx.0];
+                        assert!(matches!(bind.first, Some(Ident { name: "x", .. })));
+                        assert_eq!(bind.get_scope(), Scope::Cell);
+
+                        {
+                            let locals = fun.locals.borrow();
+                            assert_eq!(locals.len(), 2);
+
+                            let local = &f.module.bindings[locals[0].0];
+                            assert!(matches!(local.first, Some(Ident { name: "d", .. })),);
+
+                            let local = &f.module.bindings[locals[1].0];
+                            assert!(matches!(local.first, Some(Ident { name: "f", .. })),);
+                        }
+
+                        if let StmtData::DefStmt {
+                            function,
+                            def_pos,
+                            body,
+                            ..
+                        } = &body[0].data
+                        {
+                            let fun = &f.module.functions[fun_index];
+
+                            assert_eq!(fun.free_vars.borrow().len(), 1);
+                            let bindx = fun.free_vars.borrow()[0];
+                            let bind = &f.module.bindings[bindx.0];
+                            assert!(matches!(bind.first, Some(Ident { name: "x", .. })));
+                            assert_eq!(bind.get_scope(), Scope::Cell);
+
+                            if let StmtData::AssignStmt {
+                                rhs:
+                                    Expr {
+                                        data: ExprData::Ident(id),
+                                        ..
+                                    },
+                                ..
+                            } = &body[0].data
+                            {
+                                let bindx = id.binding.borrow().unwrap();
+                                let local = &f.module.bindings[bindx.0];
+                                assert!(matches!(local.first, Some(Ident { name: "x", .. })),);
+                                assert_eq!(local.get_scope(), Scope::Free);
+                                Ok(())
+                            } else {
+                                Err(anyhow!("unexpected body of function `f`"))
+                            }
+                        } else {
+                            Err(anyhow!("function `f` not resolved"))
+                        }
+                    } else {
+                        Err(anyhow!("function `update` not resolved"))
+                    }
+                } else {
+                    Err(anyhow!("function `nested` not resolved"))
+                }
             } else {
-                Err(anyhow!("function not resolved"))
+                Err(anyhow!("function `nested` not resolved"))
             }
         } else {
-            Err(anyhow!("no defstmt found"))
+            Err(anyhow!("no defstmt found for `nested`"))
         }
     }
 

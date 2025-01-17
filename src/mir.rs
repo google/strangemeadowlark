@@ -15,12 +15,15 @@
 //! Translates to mid-level intermediate representation (inspired by rustc MIR).
 //! To learn more about the Rust MIR, see <https://rust-lang.github.io/rfcs/1211-mir.html>
 
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::rc::Rc;
+use std::sync::Mutex;
 
 use crate::scan::Position;
 use crate::value::{StarlarkType, Value};
-
-use crate::binding::Module;
+//use crate::interp::Slot;
+use crate::binding::{BindingIndex, Module, Scope};
 use crate::{ExprData, ExprRef, Ident, Literal, StmtRef, Token};
 
 use bumpalo::Bump;
@@ -29,15 +32,27 @@ use bumpalo::Bump;
 pub struct Lowered<'a> {
     locals: Vec<LocalDef<'a>>,
     blocks: Vec<BlockData>,
+    funcs: HashMap<usize, FuncDescriptor>,
 }
 
 /// Index into Vec<BlockData>.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct Block(usize);
 
+impl Block {
+    fn apply_offset(&self, block_offset: usize) -> Self {
+        Block(self.0 + block_offset)
+    }
+}
 /// Index into Vec<LocalDef>.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct Local(usize);
+
+impl Local {
+    fn apply_offset(&self, local_offset: usize) -> Self {
+        Local(self.0 + local_offset)
+    }
+}
 
 const LOCAL_RETURN: Local = Local(0);
 
@@ -46,6 +61,9 @@ const LOCAL_RETURN: Local = Local(0);
 pub struct BlockData {
     instructions: Vec<Instruction>,
     terminator: Terminator,
+
+    // If this is set, is the start block of a function.
+    function_info: Option<String>,
 }
 
 impl BlockData {
@@ -53,6 +71,7 @@ impl BlockData {
         BlockData {
             instructions: vec![],
             terminator: Terminator::Return,
+            function_info: None,
         }
     }
 }
@@ -60,6 +79,8 @@ impl BlockData {
 #[derive(PartialEq, Eq, Debug)]
 pub enum Instruction {
     Nop,
+    MakeCell(Local),
+    MkFunc(Local, Box<[Local]>),
     Assign(Place, Rvalue),
     Eval(Rvalue),
     Ascribe(Place, StarlarkType),
@@ -71,7 +92,7 @@ pub enum Terminator {
         func: Local,
         args: Box<[Local]>,
         destination: Local,
-        target: Option<Block>,
+        target: Block,
     },
     ConditionalJump {
         cond: Operand,
@@ -84,23 +105,71 @@ pub enum Terminator {
     Abort(Value),
 }
 
-#[derive(PartialEq, Eq, Debug)]
+impl Terminator {
+    fn apply_offset(&self, block_offset: usize) -> Self {
+        match self {
+            Terminator::Call {
+                func,
+                args,
+                destination,
+                target,
+            } => Terminator::Call {
+                func: *func,
+                args: args.clone(),
+                destination: *destination,
+                target: target.apply_offset(block_offset),
+            },
+
+            Terminator::ConditionalJump {
+                cond,
+                true_tgt,
+                false_tgt,
+            } => Terminator::ConditionalJump {
+                cond: cond.clone(),
+                true_tgt: true_tgt.apply_offset(block_offset),
+                false_tgt: false_tgt.apply_offset(block_offset),
+            },
+
+            Terminator::Jump(block) => Terminator::Jump(block.apply_offset(block_offset)),
+            Terminator::Return => Terminator::Return,
+            Terminator::Abort(value) => Terminator::Abort(value.clone()),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Place {
-    local: Local,
-    projections: Vec<Projecion>,
+    place_ref: Ref,
+    projections: Vec<Projection>,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum Ref {
+    Local(Local),
+    FreeVar(u8),
 }
 
 impl Place {
+    // Local place: contains Value directly.
     fn from_local(local: Local) -> Self {
         Place {
-            local,
+            place_ref: Ref::Local(local),
+            projections: vec![],
+        }
+    }
+
+    // Free var: a free var that references a cell.
+    fn from_free(index: u8) -> Self {
+        Place {
+            place_ref: Ref::FreeVar(index),
             projections: vec![],
         }
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
-pub enum Projecion {
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum Projection {
+    Deref,
     Index(Local),
 }
 
@@ -109,12 +178,26 @@ pub enum Rvalue {
     UnaryOp(UnOp, Operand),
     BinaryOp(BinOp, Operand, Operand),
     Use(Operand),
+    // Constructs a tuple
+    Tuple(Box<[Local]>),
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum Operand {
     Local(Local),
+    FreeVar(u8),
+    Cell(Local),
     Constant(Value),
+    Copy(Place),
+}
+
+impl Operand {
+    fn from_place(place: &Place) -> Self {
+        match &place.place_ref {
+            Ref::Local(local) => Operand::Local(*local),
+            Ref::FreeVar(index) => Operand::FreeVar(*index),
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -137,36 +220,51 @@ impl<'a> std::fmt::Debug for LocalDef<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FuncDescriptor {
+    start_block: usize,
+    frame_size: usize,
+}
+
+impl FuncDescriptor {
+    fn apply_offset(&self, block_offset: usize, local_offset: usize) -> Self {
+        FuncDescriptor {
+            start_block: self.start_block + block_offset,
+            frame_size: self.frame_size,
+        }
+    }
+}
+
 pub struct MirBuilder<'a, 'module> {
     bump: &'a Bump,
     module: &'module Module<'a>,
     locals: Vec<LocalDef<'a>>,
     blocks: Vec<BlockData>,
-    nested: Vec<Box<MirBuilder<'a, 'module>>>,
     current: Block,
     loop_break: Vec<Block>,
     loop_continue: Vec<Block>,
+    funcs: HashMap<usize, FuncDescriptor>,
+    offset: usize,
 }
 
 impl<'a, 'module> MirBuilder<'a, 'module> {
     fn new(bump: &'a Bump, module: &'module Module<'a>) -> Self {
+        Self::with_offset(bump, module, 0)
+    }
+
+    fn with_offset(bump: &'a Bump, module: &'module Module<'a>, offset: usize) -> Self {
         let b = BlockData::new();
         MirBuilder {
             bump,
             module,
             locals: vec![],
             blocks: vec![b],
-            nested: vec![],
             current: Block(0),
             loop_break: vec![],
             loop_continue: vec![],
+            funcs: HashMap::new(),
+            offset,
         }
-    }
-
-    fn new_nested(&mut self) -> &mut MirBuilder<'a, 'module> {
-        self.nested
-            .push(Box::new(Self::new(&self.bump, self.module)));
-        self.nested.last_mut().unwrap()
     }
 
     fn push_loop(&mut self, break_b: Block, continue_b: Block) {
@@ -204,12 +302,28 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 let v = Vec::from(*bytes_lit);
                 Operand::Constant(Value::Bytes(v.into_boxed_slice()))
             }
-            ExprData::Ident(x) => Operand::Local(self.local(x)),
+            ExprData::Ident(x) => {
+                let bindx = x.binding.borrow().unwrap();
+                let bind = self.module.binding(bindx);
+                match bind.get_scope() {
+                    Scope::Local => Operand::Local(self.local(x)),
+                    Scope::Free => Operand::FreeVar(bind.index),
+                    Scope::Cell => Operand::Cell(self.local(x)),
+                    _ => todo!(),
+                }
+            }
             ExprData::BinaryExpr { x, y, op, .. } => {
                 let res = self.create_tmp();
                 let rv = self.rvalue(expr);
                 self.push_instr(Instruction::Assign(Place::from_local(res), rv));
                 Operand::Local(res)
+            }
+
+            ExprData::CallExpr { .. } => {
+                let tmp = self.create_tmp();
+                let rvalue = self.rvalue(expr);
+                self.push_instr(Instruction::Assign(Place::from_local(tmp), rvalue));
+                Operand::Local(tmp)
             }
             _ => todo!("{:?}", expr.data),
         }
@@ -346,7 +460,29 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 lparen,
                 args,
                 rparen,
-            } => todo!(),
+            } => {
+                let res = self.create_tmp();
+                let tmp = self.create_tmp();
+                let func_rvalue = self.rvalue(func);
+                self.push_instr(Instruction::Assign(Place::from_local(tmp), func_rvalue));
+
+                let mut arglocals = Vec::with_capacity(args.len());
+                for arg in args.iter() {
+                    let argtmp = self.create_tmp();
+                    arglocals.push(argtmp);
+                    let arg_rvalue = self.rvalue(arg);
+                    self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                }
+                let tail = self.create_block();
+                self.terminate(Terminator::Call {
+                    func: tmp,
+                    args: arglocals.into_boxed_slice(),
+                    destination: res,
+                    target: tail,
+                });
+                self.current = tail;
+                Rvalue::Use(Operand::Local(res))
+            }
             ExprData::Comprehension {
                 curly,
                 lbrack_pos,
@@ -375,7 +511,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
             } => todo!(),
             ExprData::Ident(_) => {
                 let place = self.place(expr);
-                Rvalue::Use(Operand::Local(place.local))
+                Rvalue::Use(Operand::from_place(&place))
             }
             ExprData::IndexExpr {
                 x,
@@ -426,13 +562,19 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
     fn local(&self, id: &'a Ident<'a>) -> Local {
         let b = id.binding.borrow().unwrap();
-        let b = &self.module.bindings[b.0];
+        let b = self.module.binding(b);
         Local(1 + (b.index as usize))
     }
 
-    fn create_local(&mut self, id: &'a Ident<'a>) -> Local {
+    fn create_local(
+        &mut self,
+        id: &'a Ident<'a>,
+        scope: Scope,
+        cell: Option<BindingIndex>,
+    ) -> Local {
         let n = self.locals.len();
-        self.locals.push(LocalDef { name: Some(id) });
+        let local = LocalDef { name: Some(id) };
+        self.locals.push(local);
         Local(n as _)
     }
 
@@ -452,13 +594,58 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
     fn build_mir(&mut self, func: usize) {
         let func = &self.module.functions[func];
+
+        {
+            // debug only
+            let mut func_info = func.name.to_string();
+            func_info.push_str(" locals:");
+            for b in func.locals.borrow().iter() {
+                let bind = self.module.binding(b);
+                use std::fmt::Write;
+                write!(
+                    func_info,
+                    " {}:{} ({})",
+                    bind.index,
+                    bind.first.unwrap().name,
+                    bind.get_scope()
+                )
+                .unwrap();
+            }
+            func_info.push_str(" freevars:");
+            for b in func.free_vars.borrow().iter() {
+                let bind = self.module.binding(b);
+                use std::fmt::Write;
+                write!(
+                    func_info,
+                    " {}:{} ({})",
+                    bind.index,
+                    bind.first.unwrap().name,
+                    bind.get_scope()
+                )
+                .unwrap();
+            }
+            self.blocks[0].function_info = Some(func_info);
+        }
+
         // Set up LOCAL_RETURN.
         self.locals.push(LocalDef { name: None });
 
         for local in func.locals.borrow().iter() {
-            let b = &self.module.bindings[local.0];
+            let b = self.module.binding(local);
             if let Some(id) = b.first.as_ref() {
-                self.create_local(id);
+                let scope = b.get_scope();
+                let local = self.create_local(
+                    id,
+                    scope,
+                    if scope == Scope::Local {
+                        None
+                    } else {
+                        Some(*local)
+                    },
+                );
+                if scope == Scope::Cell {
+                    self.push_instr(Instruction::MakeCell(local));
+                }
             }
         }
 
@@ -472,14 +659,26 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         Lowered {
             locals: self.locals,
             blocks: self.blocks,
+            funcs: self.funcs,
         }
+    }
+
+    fn lowered_with_offset(mut self, block_offset: usize) -> Lowered<'a> {
+        for block in self.blocks.iter_mut() {
+            block.terminator = block.terminator.apply_offset(block_offset);
+        }
+        self.lowered()
     }
 
     fn debug_string(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
         for (i, b) in self.blocks.iter().enumerate() {
-            writeln!(s, "Block {}", i).expect("could not write block");
+            write!(s, "Block {} ;;", i).expect("could not write block");
+            match &b.function_info {
+                Some(info) => writeln!(s, " function {}", info).unwrap(),
+                _ => writeln!(s, "").unwrap(),
+            };
             for instr in &b.instructions {
                 writeln!(s, "  {:?}", instr).expect("could not write instruction");
             }
@@ -491,10 +690,13 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
     fn place(&mut self, expr: ExprRef<'a>) -> Place {
         match expr.data {
             ExprData::Ident(id) => {
-                let b = id.binding().unwrap();
-                let b = &self.module.bindings[b.0];
-                let local = Local(1 + (b.index as usize));
-                Place::from_local(local)
+                let bindx = id.binding.borrow().unwrap();
+                let bind = self.module.binding(bindx);
+                match bind.get_scope() {
+                    Scope::Local | Scope::Cell => Place::from_local(self.local(id)),
+                    Scope::Free => Place::from_free(bind.index as _),
+                    _ => todo!(),
+                }
             }
             ExprData::IndexExpr {
                 x,
@@ -525,7 +727,14 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 rhs,
             } => {
                 if let Some(token) = op.augmented() {
-                    todo!();
+                    let op = BinOp::from_token(&token).unwrap();
+                    let place = self.place(lhs);
+                    let operand = self.rvalue(rhs);
+                    let tmp = self.create_tmp();
+                    self.push_instr(Instruction::Assign(Place::from_local(tmp), operand));
+                    let res =
+                        Rvalue::BinaryOp(op, Operand::from_place(&place), Operand::Local(tmp));
+                    self.push_instr(Instruction::Assign(place, res));
                 }
                 let place = self.place(lhs);
                 let rvalue = self.rvalue(rhs);
@@ -551,9 +760,85 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 self.push_instr(Instruction::Nop);
             }
 
-            crate::StmtData::DefStmt { function: f, .. } => {
-                let builder = self.new_nested();
+            crate::StmtData::DefStmt {
+                name,
+                function: f,
+                params,
+                ..
+            } => {
+                // We build a closure (f, env) where
+                // f   the index (code pointer) of the function
+                // env a tuple with references to each free variable
+                let func_index = f.borrow().unwrap();
+                let func = &self.module.functions[func_index];
+
+                // Get the functions locals that require cells
+
+                let mut cells = vec![];
+                for bindx in func.locals.borrow().iter() {
+                    let bind = self.module.binding(bindx);
+                    if bind.get_scope() == Scope::Cell {
+                        cells.push(bindx)
+                    }
+                }
+
+                let mut clos = vec![];
+                let tmp = self.create_tmp();
+                self.push_instr(Instruction::Assign(
+                    Place::from_local(tmp),
+                    Rvalue::Use(Operand::Constant(Value::FuncRef(func_index))),
+                ));
+                clos.push(tmp);
+                for bindx in func.free_vars.borrow().iter() {
+                    let bind = self.module.binding(bindx);
+                    let tmp = self.create_tmp();
+                    let place = match bind.get_scope() {
+                        Scope::Cell => {
+                            let place = Place::from_local(self.local(bind.first.unwrap()));
+                            self.push_instr(Instruction::Assign(
+                                Place::from_local(tmp),
+                                Rvalue::Use(Operand::Copy(place)),
+                            ));
+                        }
+                        Scope::Free => {
+                            let place = Place::from_free(bind.index);
+                            self.push_instr(Instruction::Assign(
+                                Place::from_local(tmp),
+                                Rvalue::Use(Operand::Copy(place)),
+                            ));
+                        }
+                        _ => todo!(),
+                    };
+
+                    clos.push(tmp)
+                }
+
+                let tmp = self.create_tmp();
+                let clos = Rvalue::Tuple(clos.into_boxed_slice());
+
+                let fn_local = self.local(name);
+                self.push_instr(Instruction::Assign(Place::from_local(fn_local), clos));
+
+                // Translate the function's blocks
+                let block_offset = self.blocks.len();
+                let local_offset = self.locals.len();
+                let mut builder = Self::with_offset(&self.bump, self.module, self.blocks.len());
                 builder.build_mir(f.borrow().unwrap());
+                self.funcs.insert(
+                    func_index,
+                    FuncDescriptor {
+                        start_block: block_offset,
+                        frame_size: builder.locals.len(),
+                    },
+                );
+                let lowered = builder.lowered_with_offset(block_offset);
+                self.locals.extend(lowered.locals);
+                self.blocks.extend(lowered.blocks);
+
+                for (index, descr) in lowered.funcs.iter() {
+                    self.funcs
+                        .insert(*index, descr.apply_offset(block_offset, local_offset));
+                }
             }
 
             crate::StmtData::ExprStmt { x } => {
@@ -563,41 +848,33 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
             crate::StmtData::ForStmt { vars, x, body, .. } => {
                 let head_next = self.create_block();
-                let head_test = self.create_block();
+                //let head_test = self.create_block();
                 let body_b = self.create_block();
                 let tail = self.create_block();
 
+                let seq = self.create_tmp();
+                let seq_rvalue = self.rvalue(x);
+                self.push_instr(Instruction::Assign(Place::from_local(seq), seq_rvalue));
+
+                // Get iterator.
                 let iter = self.create_tmp();
-                let iterate = self.create_tmp();
                 self.push_instr(Instruction::Assign(
-                    Place::from_local(iterate),
-                    Rvalue::Use(Operand::Constant(Value::ITERATE)),
+                    Place::from_local(iter),
+                    Rvalue::UnaryOp(UnOp::Iterate, Operand::Local(seq)),
                 ));
-                self.terminate(Terminator::Call {
-                    func: iterate,
-                    args: Box::new([Local::from(iterate)]),
-                    destination: Local::from(iter),
-                    target: Some(head_next),
-                });
+                self.terminate(Terminator::Jump(head_next));
 
                 self.current = head_next;
                 let next = self.create_tmp();
-                let it_next_fn = self.create_tmp();
-                self.push_instr(Instruction::Assign(
-                    Place::from_local(it_next_fn),
-                    Rvalue::Use(Operand::Constant(Value::ITERATOR_NEXT)),
-                ));
-                self.terminate(Terminator::Call {
-                    func: it_next_fn,
-                    args: Box::new([Local::from(iter)]),
-                    destination: Local::from(next),
-                    target: Some(head_test),
-                });
 
-                self.current = head_test;
-                let test = self.create_tmp();
                 self.push_instr(Instruction::Assign(
                     Place::from_local(next),
+                    Rvalue::UnaryOp(UnOp::IteratorNext, Operand::Local(Local::from(iter))),
+                ));
+
+                let test = self.create_tmp();
+                self.push_instr(Instruction::Assign(
+                    Place::from_local(test),
                     Rvalue::BinaryOp(
                         BinOp::TupleGet,
                         Operand::Local(next),
@@ -656,7 +933,6 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
                 self.current = head;
                 let cond = self.operand(cond);
-                println!("while stmt operand: {:?}", cond);
                 self.terminate(Terminator::ConditionalJump {
                     cond,
                     true_tgt: body_b,
@@ -739,71 +1015,161 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
     }
 }
 
+struct Activation {
+    free_vars: Vec<Rc<Mutex<Value>>>,
+    start_block: usize,
+    frame_start: usize,
+    cont_target: Block,
+    cont_destination: Local,
+}
+
 impl<'a> Lowered<'a> {
     /// Evaluating just one function. Useful for testing.
-    fn run(&self, args: &[Value]) -> Value {
-        let mut state: Vec<Value> = Vec::with_capacity(self.locals.len());
+    fn run(&self, args: &[Value], module: &Module<'a>) -> Value {
+        struct FrameStack {
+            state: Vec<Value>, //Vec<Slot>,
+            frames: Vec<Activation>,
+        }
+        impl FrameStack {
+            fn new(size: usize) -> Self {
+                Self {
+                    state: Vec::with_capacity(size),
+                    frames: vec![],
+                }
+            }
+            fn cell_local(&self, local: &Local) -> Value {
+                let index = self.get_frame_start() + local.0;
+                self.state[index].clone()
+            }
+            fn read_local(&self, local: &Local) -> Value {
+                let index = self.get_frame_start() + local.0;
+                self.state[index].clone()
+            }
+            fn cell_freevar(&self, index: u8) -> Value {
+                Value::Cell(Rc::clone(
+                    &self.frames.last().unwrap().free_vars[index as usize],
+                ))
+            }
+            fn read_freevar(&self, index: u8) -> Value {
+                let cell: &Rc<Mutex<Value>> =
+                    &self.frames.last().unwrap().free_vars[index as usize];
+                cell.lock().unwrap().clone()
+            }
+            fn read(&self, place: &Place) -> Value {
+                match &place.place_ref {
+                    Ref::Local(local) => self.read_local(local),
+                    Ref::FreeVar(index) => self.read_freevar(*index),
+                }
+            }
 
-        let get_op = |op: &Operand, state: &Vec<Value>| -> Value {
-            match op {
-                Operand::Constant(c) => c.clone(),
-                Operand::Local(local) => state[(*local).0].clone(),
+            fn frame(&self) -> &Activation {
+                self.frames.last().unwrap()
             }
-        };
-        let run_rvalue = |rv: &Rvalue, state: &Vec<Value>| -> Value {
-            match rv {
-                Rvalue::UnaryOp(un_op, operand) => {
-                    let v = get_op(operand, &state);
-                    match un_op {
-                        UnOp::Not => Value::not(&v),
-                        UnOp::BitwiseNot => Value::bitwise_not(&v),
-                        _ => todo!(),
-                    }
-                }
-                Rvalue::BinaryOp(bin_op, left, right) => {
-                    let left = get_op(left, &state);
-                    let right = get_op(right, &state);
-                    match bin_op {
-                        BinOp::Plus => Value::plus(&left, &right),
-                        BinOp::Minus => Value::minus(&left, &right),
-                        BinOp::Times => Value::times(&left, &right),
-                        BinOp::Div => Value::div(&left, &right),
-                        BinOp::FloorDiv => Value::floor_div(&left, &right),
-                        BinOp::RemFloorDivOrStringInterpolation => Value::floor_rem(&left, &right),
-                        BinOp::BitwiseAnd => Value::bitwise_and(&left, &right),
-                        BinOp::BitwiseOr => Value::bitwise_and(&left, &right),
-                        BinOp::BitwiseXor => Value::bitwise_xor(&left, &right),
-                        BinOp::ShiftLeft => Value::shift_left(&left, &right),
-                        BinOp::ShiftRight => Value::shift_right(&left, &right),
-                        BinOp::Lt => Value::less_than(&left, &right),
-                        BinOp::Gt => Value::greater_than(&left, &right),
-                        BinOp::Ge => Value::greater_than_or_equals(&left, &right),
-                        BinOp::Le => Value::less_than_or_equals(&left, &right),
-                        BinOp::Equals => Value::equals(&left, &right),
-                        BinOp::Neq => Value::not_equals(&left, &right),
-                        BinOp::TupleGet => match (left, right) {
-                            (Value::Tuple(elements), Value::Int(index)) => {
-                                elements[index as usize].clone()
+            fn get_frame_start(&self) -> usize {
+                self.frames.last().map_or(0, |f| f.frame_start)
+            }
+            fn get_op(&self, op: &Operand) -> Value {
+                match op {
+                    Operand::Constant(c) => c.clone(),
+                    Operand::FreeVar(index) => self.read_freevar(*index),
+                    Operand::Cell(local) => todo!(),
+                    Operand::Local(local) => self.read_local(local),
+                    Operand::Copy(place) => match place.place_ref {
+                        Ref::FreeVar(index) => {
+                            if let Some(Projection::Deref) = place.projections.first() {
+                                self.read_freevar(index)
+                            } else {
+                                self.cell_freevar(index)
                             }
+                        }
+                        Ref::Local(local) => self.cell_local(&local),
+                    },
+                }
+            }
+            fn run_rvalue(&self, rv: &Rvalue) -> Value {
+                match rv {
+                    Rvalue::UnaryOp(un_op, operand) => {
+                        let mut v = self.get_op(operand);
+                        if let Value::Cell(cell) = &v {
+                            v = Value::deref(cell);
+                        }
+                        match un_op {
+                            UnOp::Not => Value::not(&v),
+                            UnOp::BitwiseNot => Value::bitwise_not(&v),
                             _ => todo!(),
-                        },
+                        }
+                    }
+                    Rvalue::BinaryOp(bin_op, left, right) => {
+                        let mut left = self.get_op(left);
+                        if let Value::Cell(cell) = &left {
+                            left = Value::deref(cell);
+                        }
+                        let mut right = self.get_op(right);
+                        if let Value::Cell(cell) = &right {
+                            right = Value::deref(cell);
+                        }
+
+                        match bin_op {
+                            BinOp::Plus => Value::plus(&left, &right),
+                            BinOp::Minus => Value::minus(&left, &right),
+                            BinOp::Times => Value::times(&left, &right),
+                            BinOp::Div => Value::div(&left, &right),
+                            BinOp::FloorDiv => Value::floor_div(&left, &right),
+                            BinOp::RemFloorDivOrStringInterpolation => {
+                                Value::floor_rem(&left, &right)
+                            }
+                            BinOp::BitwiseAnd => Value::bitwise_and(&left, &right),
+                            BinOp::BitwiseOr => Value::bitwise_and(&left, &right),
+                            BinOp::BitwiseXor => Value::bitwise_xor(&left, &right),
+                            BinOp::ShiftLeft => Value::shift_left(&left, &right),
+                            BinOp::ShiftRight => Value::shift_right(&left, &right),
+                            BinOp::Lt => Value::less_than(&left, &right),
+                            BinOp::Gt => Value::greater_than(&left, &right),
+                            BinOp::Ge => Value::greater_than_or_equals(&left, &right),
+                            BinOp::Le => Value::less_than_or_equals(&left, &right),
+                            BinOp::Equals => Value::equals(&left, &right),
+                            BinOp::Neq => Value::not_equals(&left, &right),
+                            BinOp::TupleGet => match (left, right) {
+                                (Value::Tuple(elements), Value::Int(index)) => {
+                                    elements[index as usize].clone()
+                                }
+                                _ => todo!(),
+                            },
+                        }
+                    }
+                    Rvalue::Use(operand) => self.get_op(operand),
+                    Rvalue::Tuple(locals) => {
+                        let mut values = vec![];
+                        for local in locals.iter() {
+                            values.push(self.read_local(local));
+                        }
+                        Value::Tuple(values.into_boxed_slice())
                     }
                 }
-                Rvalue::Use(operand) => get_op(operand, &state),
             }
-        };
-        let assign = |place: &Place, v, state: &mut Vec<Value>| {
-            let local = place.local;
-            if place.projections.is_empty() {
-                state[local.0] = v;
+
+            fn assign(&mut self, place: &Place, v: Value) {
+                if !place.projections.is_empty() {
+                    todo!();
+                }
+                match place.place_ref {
+                    Ref::Local(local) => {
+                        let index = self.get_frame_start() + local.0;
+                        self.state[index] = v;
+                    }
+                    _ => todo!(),
+                }
             }
-        };
-        state.push(Value::None); // return value
-        for v in args {
-            state.push(v.clone());
+        }
+
+        let mut fs = FrameStack::new(self.locals.len());
+
+        fs.state.push(Value::None); // return value
+        for (i, v) in args.iter().enumerate() {
+            fs.state.push(v.clone());
         }
         for i in 1 + args.len()..self.locals.len() {
-            state.push(Value::None);
+            fs.state.push(Value::None);
         }
         let mut pc_block = Block(0);
         let mut pc_instr = 0;
@@ -813,19 +1179,23 @@ impl<'a> Lowered<'a> {
                 let instr = &block.instructions[pc_instr];
                 match instr {
                     Instruction::Nop => {}
+                    Instruction::MakeCell(local) => {
+                        fs.state[local.0] =
+                            Value::Cell(Rc::new(Mutex::new(fs.state[local.0].clone())));
+                    }
                     Instruction::Assign(place, rvalue) => {
-                        assign(place, run_rvalue(rvalue, &state), &mut state);
+                        fs.assign(place, fs.run_rvalue(rvalue));
                     }
                     Instruction::Eval(rvalue) => {
-                        run_rvalue(rvalue, &state);
+                        fs.run_rvalue(rvalue);
                     }
                     Instruction::Ascribe(place, StarlarkType::Bool)
                         if place.projections.is_empty() =>
                     {
-                        let v = &state[place.local.0];
+                        let v = &fs.read(place);
                         if let Value::Bool(_) = v {
                         } else {
-                            assign(place, v.bool(), &mut state)
+                            fs.assign(place, v.bool())
                         }
                     }
                     _ => todo!(),
@@ -839,12 +1209,55 @@ impl<'a> Lowered<'a> {
                     args,
                     destination,
                     target,
-                } => todo!(),
+                } => {
+                    let (func_index, env) = match &fs.read_local(func) {
+                        Value::Tuple(elems) => match (&elems[0], &elems[1..]) {
+                            (Value::FuncRef(func_index), values) => {
+                                let mut cells = vec![];
+                                for v in values.into_iter() {
+                                    match v {
+                                        Value::Cell(cell) => cells.push(cell.clone()),
+                                        _ => todo!(),
+                                    }
+                                }
+                                (*func_index, cells)
+                            }
+                            (x, y) => todo!("{x:?}{y:?}"),
+                        },
+                        x => todo!("{x:?}"),
+                    };
+
+                    let frame_start = fs.state.len();
+
+                    // Return
+                    fs.state.push(Value::None);
+                    for arg in args.iter() {
+                        fs.state.push(fs.read_local(arg))
+                    }
+
+                    // Grow stack to accommodate new frame.
+                    let fun_info = &self.funcs[&func_index];
+                    for i in args.len()..fun_info.frame_size {
+                        fs.state.push(Value::None);
+                    }
+
+                    let start_block = self.funcs[&func_index].start_block;
+                    fs.frames.push(Activation {
+                        free_vars: env.to_vec(),
+                        start_block,
+                        frame_start,
+                        cont_target: *target,
+                        cont_destination: *destination,
+                    });
+
+                    pc_block = Block(start_block);
+                    pc_instr = 0;
+                }
                 Terminator::ConditionalJump {
                     cond,
                     true_tgt,
                     false_tgt,
-                } => match get_op(cond, &state) {
+                } => match fs.get_op(cond) {
                     Value::Bool(b) => {
                         pc_block = if b { *true_tgt } else { *false_tgt };
                         pc_instr = 0
@@ -855,14 +1268,24 @@ impl<'a> Lowered<'a> {
                     pc_block = *tgt;
                     pc_instr = 0;
                 }
-                Terminator::Return => return state[0].clone(),
+                Terminator::Return => {
+                    if let Some(frame) = fs.frames.pop() {
+                        let index = fs.get_frame_start() + frame.cont_destination.0;
+                        fs.state[index] = fs.state[frame.frame_start].clone();
+                        fs.state.shrink_to(frame.frame_start);
+                        pc_block = frame.cont_target;
+                        pc_instr = 0;
+                    } else {
+                        return fs.state[0].clone(); //read();
+                    }
+                }
                 Terminator::Abort(Value::String(s)) => return Value::Abort(s.clone()),
                 _ => todo!(),
             }
         }
     }
 }
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum UnOp {
     Not,
     Bool,
@@ -870,6 +1293,10 @@ pub enum UnOp {
     Type,
     Hash,
     BitwiseNot, // ~
+
+    // Using operators for built-ins
+    Iterate,
+    IteratorNext,
 }
 
 impl UnOp {
@@ -888,10 +1315,7 @@ impl UnOp {
 /// - assignment variants, "in", "notin", "and" and "or" are lowered.
 /// - "div" can assume that divisor is non-zero.
 /// - a "TupleGet" in order to support iteration
-///
-/// TODO: set up type analysis and typed variants like PlusIntInt,
-/// split RemFloorDiv and StringInterpolation.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum BinOp {
     Plus,                             // +
     Minus,                            // -
@@ -969,7 +1393,7 @@ mod tests {
                 assert_eq!(bb.terminator, Terminator::Return);
 
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[]), Value::None);
+                assert_eq!(lowered.run(&[], &fm.module), Value::None);
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -994,7 +1418,7 @@ mod tests {
                     bb.instructions[0],
                     Instruction::Assign(
                         Place {
-                            local: LOCAL_RETURN,
+                            place_ref: Ref::Local(LOCAL_RETURN),
                             ..
                         },
                         Rvalue::BinaryOp(
@@ -1007,7 +1431,7 @@ mod tests {
                 assert_eq!(bb.terminator, Terminator::Return);
 
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[Value::Int(5)]), Value::Int(7));
+                assert_eq!(lowered.run(&[Value::Int(5)], &fm.module), Value::Int(7));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1042,8 +1466,99 @@ def fib(n):
                 let mut builder = MirBuilder::new(&bump, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[Value::Int(4)]), Value::Int(5));
-                assert_eq!(lowered.run(&[Value::Int(5)]), Value::Int(8));
+                assert_eq!(lowered.run(&[Value::Int(4)], &fm.module), Value::Int(5));
+                assert_eq!(lowered.run(&[Value::Int(5)], &fm.module), Value::Int(8));
+                Ok(())
+            }
+            x => Err(anyhow!("expected defstmt got {:?}", x)),
+        }
+    }
+
+    #[test]
+    fn test_nested_nofree() -> Result<()> {
+        let bump = Bump::new();
+        let fm = prepare(
+            &bump,
+            "
+def foo(x):
+  def bar(y):
+    return y + 1
+  return bar(x)
+",
+        )?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
+            StmtData::DefStmt {
+                function: f,
+                params,
+                ..
+            } => {
+                let mut builder = MirBuilder::new(&bump, &fm.module);
+                builder.build_mir(f.borrow().unwrap());
+                let lowered = builder.lowered();
+                assert_eq!(lowered.run(&[Value::Int(1)], &fm.module), Value::Int(2));
+                Ok(())
+            }
+            x => Err(anyhow!("expected defstmt got {:?}", x)),
+        }
+    }
+
+    #[test]
+    fn test_nested_simple() -> Result<()> {
+        let bump = Bump::new();
+        let fm = prepare(
+            &bump,
+            "
+def foo(x):
+  def bar():
+    return x + 1
+  return bar()
+    ",
+        )?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
+            StmtData::DefStmt {
+                function: f,
+                params,
+                ..
+            } => {
+                let mut builder = MirBuilder::new(&bump, &fm.module);
+                builder.build_mir(f.borrow().unwrap());
+                let lowered = builder.lowered();
+
+                assert_eq!(lowered.run(&[Value::Int(2)], &fm.module), Value::Int(3));
+                Ok(())
+            }
+            x => Err(anyhow!("expected defstmt got {:?}", x)),
+        }
+    }
+
+    #[test]
+    fn test_nested_cell() -> Result<()> {
+        let bump = Bump::new();
+        let fm = prepare(
+            &bump,
+            "
+def foo(x):
+  def bar(y):
+    def baz():
+      return x
+    return y + baz()
+  return bar(x)
+    ",
+        )?;
+        assert_eq!(fm.file_unit.stmts.len(), 1);
+        match &fm.file_unit.stmts[0].data {
+            StmtData::DefStmt {
+                function: f,
+                params,
+                ..
+            } => {
+                let mut builder = MirBuilder::new(&bump, &fm.module);
+                builder.build_mir(f.borrow().unwrap());
+                let lowered = builder.lowered();
+
+                assert_eq!(lowered.run(&[Value::Int(2)], &fm.module), Value::Int(4));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1063,19 +1578,19 @@ def fib(n):
 
                 // Sanity
                 assert_eq!(
-                    lowered.run(&[Value::Bool(true), Value::Bool(true)]),
+                    lowered.run(&[Value::Bool(true), Value::Bool(true)], &fm.module),
                     Value::Bool(true)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(false), Value::Bool(true)]),
+                    lowered.run(&[Value::Bool(false), Value::Bool(true)], &fm.module),
                     Value::Bool(false)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(true), Value::Bool(false)]),
+                    lowered.run(&[Value::Bool(true), Value::Bool(false)], &fm.module),
                     Value::Bool(false)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(false), Value::Bool(false)]),
+                    lowered.run(&[Value::Bool(false), Value::Bool(false)], &fm.module),
                     Value::Bool(false)
                 );
                 Ok(())
@@ -1095,8 +1610,14 @@ def fib(n):
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
-                assert_eq!(lowered.run(&[Value::Bool(false)]), Value::Bool(false));
-                assert!(matches!(lowered.run(&[Value::Bool(true)]), Value::Abort(_)));
+                assert_eq!(
+                    lowered.run(&[Value::Bool(false)], &fm.module),
+                    Value::Bool(false)
+                );
+                assert!(matches!(
+                    lowered.run(&[Value::Bool(true)], &fm.module),
+                    Value::Abort(_)
+                ));
                 Ok(())
             }
             x => return Err(anyhow!("expected defstmt got {:?}", x)),
