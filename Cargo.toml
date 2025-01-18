@@ -1,6 +1,6 @@
 [package]
 name = "strangemeadowlark"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 license = "Apache-2.0"
 keywords = ["starlark"]
@@ -10,9 +10,11 @@ repository = "https://github.com/google/strangemeadowlark/"
 
 [dependencies]
 anyhow = "1.0"
-googletest = "0.13"
 num-bigint = "0.4"
 num-traits = "0.2"
 unicode_categories = "0.1"
 bumpalo = "3.14"
 thiserror = "2"
+
+[dev-dependencies]
+googletest = "0.13"
