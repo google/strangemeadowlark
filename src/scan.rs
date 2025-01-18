@@ -1088,24 +1088,27 @@ fn is_ident(c: char) -> bool {
 #[cfg(test)]
 mod tests {
 
+    use googletest::prelude::*;
+
     use super::*;
 
     #[test]
-    fn test_basic_seq() -> Result<()> {
+    fn test_basic_seq() -> googletest::Result<()> {
         use Token::*;
         let expected: Vec<Token> = vec![LBrace, LParen, LBrack, RBrack, RParen, RBrace, Eof];
         let mut tokens: Vec<Token> = vec![];
         let bump = Bump::new();
         let mut sc = Scanner::new(&bump, &"test", "{ ( [ ] ) }", false)?;
         while sc.token_buf.kind != Token::Eof {
-            tokens.push(sc.next_token()?.kind)
+            let tok = sc.next_token();
+            assert!(tok.is_ok());
+            tokens.push(tok.unwrap().kind)
         }
-        assert_eq!(tokens, expected);
-        Ok(())
+        verify_that!(tokens, eq(&expected))
     }
 
     #[test]
-    fn test_inputs() {
+    fn test_inputs() -> googletest::Result<()> {
         let test_cases: Vec<(&str, &str)> = vec![
             ("", "eof"),
             ("", "eof"),
@@ -1200,10 +1203,11 @@ pass", "pass newline pass eof"), // consecutive newlines are consolidated
                 }
                 match sc.next_token() {
                     Ok(tok) => tokens.push_str(&format!("{}", tok.kind)),
-                    Err(msg) => assert!(false, "{} {}", msg, input),
+                    Err(msg) => fail!("{} {}", msg, input)?,
                 }
             }
             assert_eq!(tokens, want, "{}", input);
         }
+        Ok(())
     }
 }

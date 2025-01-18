@@ -10,6 +10,7 @@ repository = "https://github.com/google/strangemeadowlark/"
 
 [dependencies]
 anyhow = "1.0"
+googletest = "0.13"
 num-bigint = "0.4"
 num-traits = "0.2"
 unicode_categories = "0.1"

@@ -1416,6 +1416,7 @@ impl<'resolve, 'a> Resolver<'a> {
 mod tests {
     use super::*;
     use anyhow::{anyhow, Result};
+    use googletest::prelude::*;
 
     use crate::{parse, FileUnit, Mode};
     fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<FileUnitWithModule<'a>> {
@@ -1432,28 +1433,57 @@ mod tests {
         assert_eq!(f.module.globals.len(), 1);
         let bx = f.module.globals[0];
         let b = &f.module.bindings[bx.0];
-        assert_eq!(b.get_scope(), Scope::Global);
-        assert_eq!(b.index, 0);
+        assert_that!(b.get_scope(), eq(Scope::Global));
+        assert_that!(b.index, eq(0));
         if let Some(id) = b.first {
-            assert_eq!(id.name, "a");
+            assert_that!(id.name, eq("a"));
         } else {
-            panic!("first is 0");
+            fail!("first is 0");
         }
         Ok(())
     }
 
     #[test]
-    fn basic_file_global_error() -> Result<()> {
+    fn basic_file_global_error() -> googletest::Result<()> {
         let bump = Bump::new();
         let input = "a = 3\na = 4";
         let f = prepare(&bump, input);
-        if let Err(e) = f {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "expected error due to global reassign {:?}.",
-                f.unwrap().file_unit
-            ))
+
+        // Expect error due to global reassign.
+        verify_that!(f.is_err(), eq(true))
+    }
+
+    #[derive(MatcherBase)]
+    struct IdentHasName {
+        expected: String,
+    }
+
+    impl Matcher<Option<&'_ Ident<'_>>> for IdentHasName {
+        fn matches(&self, actual: Option<&'_ Ident<'_>>) -> googletest::matcher::MatcherResult {
+            if let Some(actual) = actual {
+                (self.expected == actual.name).into()
+            } else {
+                false.into()
+            }
+        }
+
+        fn describe(
+            &self,
+            matcher_result: googletest::matcher::MatcherResult,
+        ) -> googletest::description::Description {
+            match matcher_result {
+                googletest::matcher::MatcherResult::Match => {
+                    format!("has name {:?}", self.expected).into()
+                }
+                googletest::matcher::MatcherResult::NoMatch => {
+                    format!("does not have name {:?}", self.expected).into()
+                }
+            }
+        }
+    }
+    fn ident_has_name(name: &str) -> IdentHasName {
+        IdentHasName {
+            expected: name.to_owned(),
         }
     }
 
@@ -1466,22 +1496,17 @@ mod tests {
         assert_eq!(f.module.globals.len(), 2);
         let bx = f.module.globals[0];
         let b = &f.module.bindings[bx.0];
-        assert_eq!(b.get_scope(), Scope::Global);
+
+        assert_that!(b.get_scope(), eq(Scope::Global));
         assert_eq!(b.index, 0);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "f");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("f"));
+
         let bx = &f.module.globals[1];
         let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 1);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "a");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("a"));
+
         Ok(())
     }
 
@@ -1496,29 +1521,20 @@ mod tests {
         let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 0);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "bar");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("bar"));
+
         let bx = f.module.locals[1];
         let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 1);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "baz");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("baz"));
+
         let bx = f.module.locals[2];
         let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 2);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "x");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("x"));
+
         Ok(())
     }
 
@@ -1541,11 +1557,8 @@ def nested(x):   # x has Scope::Cell
         let b = &f.module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
-        if let Some(id) = b.first {
-            assert_eq!(id.name, "nested");
-        } else {
-            panic!("first is None");
-        }
+        assert_that!(b.first, ident_has_name("nested"));
+
         assert_eq!(f.file_unit.stmts.len(), 1);
         if let StmtData::DefStmt {
             function,
@@ -1560,22 +1573,17 @@ def nested(x):   # x has Scope::Cell
                 let locals = &fun.locals.borrow();
                 assert_eq!(locals.len(), 3);
 
-                {
-                    let local = &f.module.bindings[locals[0].0];
-                    assert!(matches!(local.first, Some(Ident { name: "x", .. })));
-                    assert_eq!(local.get_scope(), Scope::Cell);
-                }
-                {
-                    let local = &f.module.bindings[locals[1].0];
-                    assert!(matches!(local.first, Some(Ident { name: "update", .. })));
-                    assert_eq!(local.get_scope(), Scope::Local);
-                }
+                let local = &f.module.bindings[locals[0].0];
+                assert_eq!(local.get_scope(), Scope::Cell);
+                assert_that!(local.first, ident_has_name("x"));
 
-                {
-                    let local = &f.module.bindings[locals[2].0];
-                    assert!(matches!(local.first, Some(Ident { name: "e", .. })));
-                    assert_eq!(local.get_scope(), Scope::Local);
-                }
+                let local = &f.module.bindings[locals[1].0];
+                assert_eq!(local.get_scope(), Scope::Local);
+                assert_that!(local.first, ident_has_name("update"));
+
+                let local = &f.module.bindings[locals[2].0];
+                assert_eq!(local.get_scope(), Scope::Local);
+                assert_that!(local.first, ident_has_name("e"));
 
                 assert!(body.len() > 0);
                 if let StmtData::DefStmt {
@@ -1591,19 +1599,18 @@ def nested(x):   # x has Scope::Cell
                         assert_eq!(fun.free_vars.borrow().len(), 1);
                         let bindx = fun.free_vars.borrow()[0];
                         let bind = &f.module.bindings[bindx.0];
-                        assert!(matches!(bind.first, Some(Ident { name: "x", .. })));
+
                         assert_eq!(bind.get_scope(), Scope::Cell);
+                        assert_that!(bind.first, ident_has_name("x"));
 
-                        {
-                            let locals = fun.locals.borrow();
-                            assert_eq!(locals.len(), 2);
+                        let locals = fun.locals.borrow();
+                        assert_eq!(locals.len(), 2);
 
-                            let local = &f.module.bindings[locals[0].0];
-                            assert!(matches!(local.first, Some(Ident { name: "d", .. })),);
+                        let local = &f.module.bindings[locals[0].0];
+                        assert_that!(local.first, ident_has_name("d"));
 
-                            let local = &f.module.bindings[locals[1].0];
-                            assert!(matches!(local.first, Some(Ident { name: "f", .. })),);
-                        }
+                        let local = &f.module.bindings[locals[1].0];
+                        assert_that!(local.first, ident_has_name("f"));
 
                         if let StmtData::DefStmt {
                             function,
@@ -1617,8 +1624,9 @@ def nested(x):   # x has Scope::Cell
                             assert_eq!(fun.free_vars.borrow().len(), 1);
                             let bindx = fun.free_vars.borrow()[0];
                             let bind = &f.module.bindings[bindx.0];
-                            assert!(matches!(bind.first, Some(Ident { name: "x", .. })));
+
                             assert_eq!(bind.get_scope(), Scope::Cell);
+                            assert_that!(bind.first, ident_has_name("x"));
 
                             if let StmtData::AssignStmt {
                                 rhs:
@@ -1631,8 +1639,8 @@ def nested(x):   # x has Scope::Cell
                             {
                                 let bindx = id.binding.borrow().unwrap();
                                 let local = &f.module.bindings[bindx.0];
-                                assert!(matches!(local.first, Some(Ident { name: "x", .. })),);
                                 assert_eq!(local.get_scope(), Scope::Free);
+                                assert_that!(bind.first, ident_has_name("x"));
                                 Ok(())
                             } else {
                                 Err(anyhow!("unexpected body of function `f`"))
@@ -1686,6 +1694,7 @@ def fib(n):
   return i
 ";
         let f = prepare(&bump, input);
+
         if let Err(e) = f {
             Ok(())
         } else {

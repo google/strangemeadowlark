@@ -1489,6 +1489,7 @@ mod test {
 
     use super::*;
     use anyhow::{anyhow, Result};
+    use googletest::prelude::*;
 
     #[test]
     pub fn test_expr_parse_error() -> Result<()> {
@@ -1496,7 +1497,7 @@ mod test {
         let x = parse_expr(&bump, "x(()");
         match x {
             Err(e @ ParseError::UnexpectedToken { .. }) => {
-                assert_eq!(e.to_string(), "unknown:1:5 got eof, want )");
+                assert_that!(e.to_string(), eq("unknown:1:5 got eof, want )"));
                 Ok(())
             }
             Err(e) => Err(anyhow!("wrong error: {e}")),
@@ -1635,7 +1636,7 @@ mod test {
             match super::parse_expr(&bump, test_case.input) {
                 Ok(expr) => {
                     let s = format!("{}", expr.data);
-                    assert_eq!(s, test_case.want)
+                    assert_that!(s, eq(test_case.want))
                 }
                 Err(msg) => assert!(false, "{}", msg),
             }
@@ -1643,7 +1644,7 @@ mod test {
     }
 
     #[test]
-    fn test_stmt_parse_trees() {
+    fn test_stmt_parse_trees() -> googletest::prelude::Result<()> {
         let bump = super::Bump::new();
         let test_cases = vec![
             TestCase {
@@ -1764,24 +1765,25 @@ def h():
             match super::parse(&bump, test_case.input) {
                 Ok(file_unit) if file_unit.stmts.len() >= 1 => {
                     let s = format!("{}", file_unit.stmts[0].data);
-                    assert_eq!(s, test_case.want)
+                    assert_that!(s, eq(test_case.want))
                 }
-                Ok(_) => assert!(false, "empty?"),
-                Err(msg) => assert!(false, "{}", msg),
+                Ok(_) => fail!("empty?")?,
+                Err(msg) => fail!("{}", msg)?,
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn test_retain_comments() -> Result<()> {
+    fn test_retain_comments() -> googletest::prelude::Result<()> {
         let bump = super::Bump::new();
         let input = "# Hello world
 foo() #Suffix
 # Goodbye world";
         let res = parse_with_mode(&bump, &"foo.star", input, Mode::RetainComments)?;
-        assert_eq!(
+        assert_that!(
             res.line_comments,
-            vec![
+            eq(vec![
                 &Comment {
                     start: Position { line: 1, col: 1 },
                     text: "# Hello world"
@@ -1790,14 +1792,14 @@ foo() #Suffix
                     start: Position { line: 3, col: 1 },
                     text: "# Goodbye world"
                 }
-            ]
+            ])
         );
-        assert_eq!(
+        assert_that!(
             res.suffix_comments,
-            vec![&Comment {
+            eq(vec![&Comment {
                 start: Position { line: 2, col: 7 },
                 text: "#Suffix"
-            }]
+            }])
         );
         Ok(())
     }

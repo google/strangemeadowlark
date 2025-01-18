@@ -387,9 +387,10 @@ mod test {
     use super::*;
     use crate::{parse_with_mode, Mode};
     use bumpalo::Bump;
+    use googletest::prelude::*;
 
     #[test]
-    fn test_basic() -> Result<()> {
+    fn test_basic() -> googletest::prelude::Result<()> {
         let src = "\
 #hello
 x = 1
@@ -410,9 +411,10 @@ for x in foo():
 
         let mut w = String::new();
         let mut printer = Printer::new(unit, &mut w);
-        printer.print_file_unit()?;
 
-        assert_eq!(&src, &w);
+        assert!(printer.print_file_unit().is_ok());
+
+        assert_that!(&src, eq(&w));
         Ok(())
     }
 }

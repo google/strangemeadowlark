@@ -255,7 +255,3 @@ impl PartialEq for Value {
 }
 
 impl Eq for Value {}
-
-//trait Iterator {
-//    fn next() bool
-//}
