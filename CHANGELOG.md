@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.0] - unreleased
+## [0.4.0] - 2025-01-18
 
 ### 🚀 Features
 
-- Beginnings of a compiler & lightweight virtual machine.
+- Translation to a Rust MIR-like IR.
+
+### 🐛 Bug Fixes
+
+- Fixed a bug in name resolution, more checks
 
 ## [0.3.0] - 2024-09-24
 
