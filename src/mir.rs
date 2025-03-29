@@ -20,11 +20,10 @@ use std::fmt::Display;
 use std::rc::Rc;
 use std::sync::Mutex;
 
+use crate::binding::{BindingIndex, Module, Scope};
 use crate::scan::Position;
 use crate::value::{StarlarkType, Value};
-//use crate::interp::Slot;
-use crate::binding::{BindingIndex, Module, Scope};
-use crate::{ExprData, ExprRef, Ident, Literal, StmtRef, Token};
+use crate::{ExprData, ExprRef, Ident, Literal, StmtData, StmtRef, Token};
 
 use bumpalo::Bump;
 
@@ -710,7 +709,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
     fn stmt(&mut self, stmt: StmtRef<'a>) {
         match &stmt.data {
-            crate::StmtData::AssignStmt {
+            StmtData::AssignStmt {
                 op_pos,
                 op: Token::Eq,
                 lhs,
@@ -720,7 +719,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 let rvalue = self.rvalue(rhs);
                 self.push_instr(Instruction::Assign(place, rvalue));
             }
-            crate::StmtData::AssignStmt {
+            StmtData::AssignStmt {
                 op_pos,
                 op,
                 lhs,
@@ -740,27 +739,27 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 let rvalue = self.rvalue(rhs);
                 self.push_instr(Instruction::Assign(place, rvalue));
             }
-            crate::StmtData::BranchStmt {
+            StmtData::BranchStmt {
                 token: Token::Break,
                 ..
             } => {
                 self.terminate(Terminator::Jump(*self.loop_break.last().unwrap()));
                 self.current = self.create_block();
             }
-            crate::StmtData::BranchStmt {
+            StmtData::BranchStmt {
                 token: Token::Continue,
                 ..
             } => {
                 self.terminate(Terminator::Jump(*self.loop_continue.last().unwrap()));
                 self.current = self.create_block();
             }
-            crate::StmtData::BranchStmt {
+            StmtData::BranchStmt {
                 token: Token::Pass, ..
             } => {
                 self.push_instr(Instruction::Nop);
             }
 
-            crate::StmtData::DefStmt {
+            StmtData::DefStmt {
                 name,
                 function: f,
                 params,
@@ -841,12 +840,12 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 }
             }
 
-            crate::StmtData::ExprStmt { x } => {
+            StmtData::ExprStmt { x } => {
                 let rv = self.rvalue(x);
                 self.push_instr(Instruction::Eval(rv));
             }
 
-            crate::StmtData::ForStmt { vars, x, body, .. } => {
+            StmtData::ForStmt { vars, x, body, .. } => {
                 let head_next = self.create_block();
                 //let head_test = self.create_block();
                 let body_b = self.create_block();
@@ -925,7 +924,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 self.pop_loop();
                 self.current = tail;
             }
-            crate::StmtData::WhileStmt { cond, body, .. } => {
+            StmtData::WhileStmt { cond, body, .. } => {
                 let head = self.create_block();
                 let body_b = self.create_block();
                 let tail = self.create_block();
@@ -949,7 +948,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
                 self.current = tail;
             }
-            crate::StmtData::IfStmt {
+            StmtData::IfStmt {
                 cond,
                 then_arm,
                 else_arm,
@@ -990,7 +989,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 }
                 self.current = tail;
             }
-            crate::StmtData::ReturnStmt { return_pos, result } => {
+            StmtData::ReturnStmt { return_pos, result } => {
                 let rvalue = if let Some(result) = result {
                     self.rvalue(result)
                 } else {
@@ -999,10 +998,10 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 self.push_instr(Instruction::Assign(Place::from_local(LOCAL_RETURN), rvalue));
                 self.terminate(Terminator::Return);
             }
-            crate::StmtData::BranchStmt { .. } => {
+            StmtData::BranchStmt { .. } => {
                 todo!("cannot happen") // we covered all branch stmt tokens above
             }
-            crate::StmtData::LoadStmt { .. } => {
+            StmtData::LoadStmt { .. } => {
                 todo!("This cannot happen") // load must be at top-level
             }
         }
