@@ -1,44 +1,133 @@
 use crate::{
     quote::{quote, quote_bytes},
-    Clause, Expr, ExprData, FileUnit, Literal, Span, Stmt,
+    Clause, Expr, ExprData, FileUnit, Literal, Span, Stmt, StmtData,
 };
 use anyhow::Result;
 use std::fmt;
 
-static INDENT: u32 = 2;
+static INDENT: usize = 2;
+
+pub struct PrinterOptions {
+    pub split_module_fn_args: bool,
+    pub max_chars: Option<usize>,
+}
+
+impl Default for PrinterOptions {
+    fn default() -> Self {
+        Self {
+            split_module_fn_args: false,
+            max_chars: Some(100),
+        }
+    }
+}
+
+impl PrinterOptions {
+    fn nested() -> Self {
+        Self {
+            split_module_fn_args: false,
+            max_chars: None,
+        }
+    }
+}
 
 pub struct Printer<'ast, 'w> {
     unit: &'ast FileUnit<'ast>,
     writer: &'w mut dyn fmt::Write,
-    current_line: u32,
-    last_comment_line: u32,
-    indent: u32,
+    current_line: usize,
+    current_col: usize,
+    last_comment_line: usize,
+    current_indent: usize,
+    indents: Vec<usize>,
+    options: PrinterOptions,
 }
 
 impl<'ast, 'w> Printer<'ast, 'w> {
-    pub fn new(unit: &'ast FileUnit<'ast>, writer: &'w mut dyn fmt::Write) -> Self {
+    pub fn new_with_options(
+        unit: &'ast FileUnit<'ast>,
+        writer: &'w mut dyn fmt::Write,
+        options: PrinterOptions,
+    ) -> Self {
         Printer {
             unit,
             writer,
             current_line: 1,
+            current_col: 1,
             last_comment_line: 0,
-            indent: 0,
+            current_indent: 0,
+            indents: vec![],
+            options,
         }
     }
 
-    fn print_indent(&mut self) -> Result<()> {
-        for _i in 0..self.indent {
-            write!(self.writer, " ")?;
+    pub fn new(unit: &'ast FileUnit<'ast>, writer: &'w mut dyn fmt::Write) -> Self {
+        Self::new_with_options(unit, writer, PrinterOptions::default())
+    }
+
+    fn nested<'b>(&self, buffer: &'b mut String) -> Printer<'ast, 'b> {
+        Printer {
+            unit: self.unit,
+            writer: buffer,
+            current_line: 1,
+            current_col: 1,
+            last_comment_line: 0,
+            current_indent: 0,
+            indents: vec![],
+            options: PrinterOptions::nested(),
         }
+    }
+
+    fn write(&mut self, text: &str) -> Result<()> {
+        self.current_col += text.len();
+        write!(self.writer, "{}", text)?;
+        Ok(())
+    }
+
+    fn write_wrapped(&mut self, prefix: &str, text: &str) -> Result<()> {
+        self.current_col += prefix.len() + text.len();
+        if let Some(limit) = self.options.max_chars {
+            if limit <= self.current_col {
+                writeln!(self.writer)?;
+                self.current_line += 1;
+                self.current_col = 1;
+                self.print_indent()?;
+                self.current_col += text.len();
+            } else {
+                write!(self.writer, "{}", prefix)?;
+            }
+        }
+        write!(self.writer, "{}", text)?;
+        Ok(())
+    }
+
+    fn writeln(&mut self, text: &str) -> Result<()> {
+        writeln!(self.writer, "{}", text)?;
+        self.current_col = 1;
+        Ok(())
+    }
+
+    fn print_indent(&mut self) -> Result<()> {
+        for _i in 0..self.current_indent {
+            self.write(" ")?;
+        }
+        self.current_col = self.current_indent;
         Ok(())
     }
 
     fn incr_indent(&mut self) {
-        self.indent += INDENT;
+        self.current_indent += INDENT;
     }
 
     fn decr_indent(&mut self) {
-        self.indent -= INDENT;
+        self.current_indent -= INDENT;
+    }
+
+    fn push_indent(&mut self) {
+        self.indents.push(self.current_indent);
+        self.current_indent = self.current_col;
+    }
+
+    fn pop_indent(&mut self) {
+        self.current_indent = self.indents.pop().unwrap();
     }
 
     // We infer what line number we are on based on `last`.
@@ -46,15 +135,15 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     // but it should be consistent with the line information
     // on the line comments.
     fn print_newline(&mut self, last: &Span) -> Result<()> {
-        writeln!(self.writer)?;
-        self.current_line = last.end.line + 1;
+        self.writeln("")?;
+        self.current_line = last.end.line as usize + 1;
         Ok(())
     }
 
     fn print_suffix_newline(&mut self, current: &Span) -> Result<()> {
         for comment in self.unit.suffix_comments {
             if comment.start.line == current.start.line {
-                write!(self.writer, " {}", comment.text)?;
+                self.write(&format!(" {}", comment.text))?;
                 break;
             }
         }
@@ -63,23 +152,23 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 
     fn print_line_comments(&mut self, up_to: &Span) -> Result<()> {
         for comment in self.unit.line_comments {
-            if comment.start.line <= self.last_comment_line {
+            if comment.start.line as usize <= self.last_comment_line {
                 continue;
             }
             if comment.start.line > up_to.start.line {
                 break;
             }
-            for _ in 0..(comment.start.line - self.current_line) {
-                writeln!(self.writer)?;
+            for _ in 0..(comment.start.line as usize - self.current_line) {
+                self.writeln("")?;
                 self.current_line += 1;
             }
             for _ in 1..comment.start.col {
-                write!(self.writer, " ")?;
+                self.write(" ")?;
             }
 
-            writeln!(self.writer, "{}", comment.text)?;
-            self.last_comment_line = comment.start.line;
-            self.current_line = comment.start.line + 1;
+            self.writeln(comment.text)?;
+            self.last_comment_line = comment.start.line as usize;
+            self.current_line = comment.start.line as usize + 1;
         }
         Ok(())
     }
@@ -96,20 +185,29 @@ impl<'ast, 'w> Printer<'ast, 'w> {
         self.print_line_comments(&stmt.span)?;
         self.print_indent()?;
         match &stmt.data {
-            crate::StmtData::AssignStmt { op, lhs, rhs, .. } => {
+            StmtData::AssignStmt { op, lhs, rhs, .. } => {
                 self.print_expr(lhs)?;
-                write!(self.writer, " {} ", op)?;
+                self.write(" ")?;
+                self.write(&op.to_string())?;
+                self.write(" ")?;
                 self.print_expr(rhs)?;
             }
-            crate::StmtData::BranchStmt { token, .. } => {
-                write!(self.writer, "{}", token)?;
+            StmtData::BranchStmt { token, .. } => {
+                self.write(&token.to_string())?;
             }
-            crate::StmtData::DefStmt {
+            StmtData::DefStmt {
                 name, params, body, ..
             } => {
-                write!(self.writer, "def {}(", name.name)?;
-                self.print_comma_separated(params.iter())?;
-                write!(self.writer, "):")?;
+                let is_module = self.current_indent == 0;
+                self.write(&format!("def {}(", name.name))?;
+                if is_module && self.options.split_module_fn_args {
+                    self.print_line_separated(params.iter(), &stmt.span)?;
+                } else {
+                    self.push_indent();
+                    self.print_comma_separated(params.iter())?;
+                    self.pop_indent();
+                }
+                self.write("):")?;
                 self.print_newline(&stmt.span)?;
                 self.incr_indent();
                 for stmt in body.iter() {
@@ -117,29 +215,28 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 }
                 self.decr_indent();
             }
-            crate::StmtData::ExprStmt { x } => {
+            StmtData::ExprStmt { x } => {
                 self.print_expr(x)?;
             }
-            crate::StmtData::ForStmt { vars, x, body, .. } => {
-                write!(self.writer, "for ")?;
+            StmtData::ForStmt { vars, x, body, .. } => {
+                self.write("for ")?;
                 match &vars.data {
                     ExprData::TupleExpr { list, .. } => {
-                        write!(
-                            self.writer,
-                            "{}",
-                            list.iter()
+                        self.write(
+                            &list
+                                .iter()
                                 .map(|ex| format!("{}", ex.data))
                                 .collect::<Vec<_>>()
-                                .join(",")
+                                .join(","),
                         )?;
                     }
                     _ => {
                         self.print_expr(vars)?;
                     }
                 };
-                write!(self.writer, " in ")?;
+                self.write(" in ")?;
                 self.print_expr(x)?;
-                write!(self.writer, ":")?;
+                self.write(":")?;
                 self.print_newline(&x.span)?;
                 self.incr_indent();
                 for stmt in body.iter() {
@@ -147,10 +244,10 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 }
                 self.decr_indent();
             }
-            crate::StmtData::WhileStmt { cond, body, .. } => {
-                write!(self.writer, "while ")?;
+            StmtData::WhileStmt { cond, body, .. } => {
+                self.write("while ")?;
                 self.print_expr(cond)?;
-                write!(self.writer, ":")?;
+                self.write(":")?;
                 self.print_newline(&cond.span)?;
                 self.incr_indent();
                 for stmt in body.iter() {
@@ -158,15 +255,15 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 }
                 self.decr_indent();
             }
-            crate::StmtData::IfStmt {
+            StmtData::IfStmt {
                 cond,
                 then_arm,
                 else_arm,
                 ..
             } => {
-                write!(self.writer, "if ")?;
+                self.write("if ")?;
                 self.print_expr(cond)?;
-                write!(self.writer, ":")?;
+                self.write(":")?;
                 self.print_newline(&cond.span)?;
                 self.incr_indent();
                 for stmt in then_arm.iter() {
@@ -175,7 +272,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.decr_indent();
                 if !else_arm.is_empty() {
                     self.print_indent()?;
-                    write!(self.writer, "else:")?;
+                    self.write("else:")?;
                     self.incr_indent();
                     self.print_newline(&cond.span)?;
                     for stmt in then_arm.iter() {
@@ -184,29 +281,29 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                     self.decr_indent();
                 }
             }
-            crate::StmtData::LoadStmt {
+            StmtData::LoadStmt {
                 module, from, to, ..
             } => {
-                write!(self.writer, "load(")?;
+                self.write("load(")?;
                 self.print_expr(module)?;
                 for (f, t) in from.iter().zip(to.iter()) {
-                    write!(self.writer, ", ")?;
+                    self.write(", ")?;
                     if f == t {
-                        write!(self.writer, "{:?}", f.name)?;
+                        self.write(&format!("{:?}", f.name))?;
                     } else {
-                        write!(self.writer, "{} = {:?}", f.name, t.name)?;
+                        self.write(&format!("{} = {:?}", f.name, t.name))?;
                     }
                 }
-                write!(self.writer, ")")?;
+                self.write(")")?;
             }
-            crate::StmtData::ReturnStmt {
+            StmtData::ReturnStmt {
                 return_pos: _,
                 result,
             } => {
-                write!(self.writer, "return")?;
+                self.write("return")?;
                 match result {
                     Some(res) => {
-                        write!(self.writer, " ")?;
+                        self.write(" ")?;
                         self.print_expr(res)?
                     }
                     _ => {}
@@ -220,13 +317,13 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     pub fn print_clause(&mut self, clause: &Clause) -> Result<()> {
         match clause {
             Clause::ForClause { vars, x, .. } => {
-                write!(self.writer, " for ")?;
+                self.write(" for ")?;
                 self.print_expr(vars)?;
-                write!(self.writer, " in ")?;
+                self.write(" in ")?;
                 self.print_expr(x)?;
             }
             Clause::IfClause { cond, .. } => {
-                write!(self.writer, "if ")?;
+                self.write("if ")?;
                 self.print_expr(cond)?;
             }
         }
@@ -239,140 +336,175 @@ impl<'ast, 'w> Printer<'ast, 'w> {
     ) -> Result<()> {
         let mut first = true;
         for expr in exprs {
+            let prefix = if first {
+                first = false;
+                ""
+            } else {
+                self.write(",")?;
+                " "
+            };
+            let mut buffer = String::new();
+            let mut p = self.nested(&mut buffer);
+            p.print_expr(expr)?;
+            self.write_wrapped(prefix, &buffer)?;
+        }
+        Ok(())
+    }
+
+    pub fn print_line_separated<'a>(
+        &mut self,
+        exprs: impl Iterator<Item = &'a &'a Expr<'a>>,
+        mut last_span: &'a Span,
+    ) -> Result<()> {
+        self.incr_indent();
+        self.incr_indent();
+        let mut first = true;
+        for (i, expr) in exprs.enumerate() {
             if first {
                 first = false
             } else {
-                write!(self.writer, ", ")?;
+                self.write(",")?;
             }
+            self.print_newline(last_span)?;
+            self.print_indent()?;
             self.print_expr(expr)?;
+            last_span = &expr.span;
         }
+        self.decr_indent();
+        self.decr_indent();
         Ok(())
     }
 
     pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         match &expr.data {
-            crate::ExprData::BinaryExpr { x, op, y, .. } => {
+            ExprData::BinaryExpr { x, op, y, .. } => {
                 self.print_expr(x)?;
-                write!(self.writer, " {} ", op)?;
+                self.write(" ")?;
+                self.write(&format!("{}", op))?;
+                self.write(" ")?;
                 self.print_expr(y)?;
             }
-            crate::ExprData::CallExpr { func, args, .. } => {
-                write!(self.writer, "{}(", func.data)?;
+            ExprData::CallExpr { func, args, .. } => {
+                self.write(&format!("{}", func.data))?;
+                self.write("(")?;
+                self.push_indent();
                 self.print_comma_separated(args.iter())?;
-                write!(self.writer, ")")?;
+                self.pop_indent();
+                self.write(")")?;
             }
-            crate::ExprData::Comprehension {
+            ExprData::Comprehension {
                 curly,
                 body,
                 clauses,
                 ..
             } => {
-                write!(self.writer, "{}", if *curly { "{" } else { "[" })?;
+                self.write(if *curly { "{" } else { "[" })?;
                 self.print_expr(body)?;
                 for clause in clauses.iter() {
                     self.print_clause(clause)?;
                 }
-                write!(self.writer, "{}", if *curly { "{" } else { "]" })?;
+                self.write(if *curly { "{" } else { "]" })?;
             }
-            crate::ExprData::CondExpr {
+            ExprData::CondExpr {
                 cond,
                 then_arm,
                 else_arm,
                 ..
             } => {
                 self.print_expr(then_arm)?;
-                write!(self.writer, " if ")?;
+                self.write(" if ")?;
                 self.print_expr(cond)?;
-                write!(self.writer, " else ")?;
+                self.write(" else ")?;
                 self.print_expr(else_arm)?;
             }
-            crate::ExprData::DictEntry {
+            ExprData::DictEntry {
                 key,
                 colon: _,
                 value,
             } => {
                 self.print_expr(key)?;
-                write!(self.writer, ": ")?;
+                self.write(": ")?;
                 self.print_expr(value)?;
             }
-            crate::ExprData::DictExpr { list, .. } => {
-                write!(self.writer, "{{")?;
+            ExprData::DictExpr { list, .. } => {
+                self.write("{")?;
                 self.print_comma_separated(list.iter())?;
-                write!(self.writer, "}}")?;
+                self.write("}")?;
             }
-            crate::ExprData::DotExpr { x, name, .. } => {
+            ExprData::DotExpr { x, name, .. } => {
                 self.print_expr(x)?;
-                write!(self.writer, ".{}", name.name)?;
+                self.write(" ")?;
+                self.write(name.name)?;
             }
-            crate::ExprData::Ident(ident) => {
-                write!(self.writer, "{}", ident.name)?;
+            ExprData::Ident(ident) => {
+                self.write(ident.name)?;
             }
-            crate::ExprData::IndexExpr { x, y, .. } => {
+            ExprData::IndexExpr { x, y, .. } => {
                 self.print_expr(x)?;
-                write!(self.writer, "[")?;
+                self.write("[")?;
                 self.print_expr(y)?;
-                write!(self.writer, "]")?;
+                self.write("]")?;
             }
-            crate::ExprData::LambdaExpr { params, body, .. } => {
+            ExprData::LambdaExpr { params, body, .. } => {
                 self.print_comma_separated(params.iter())?;
-                write!(self.writer, ": ")?;
+                self.write(": ")?;
                 self.print_expr(body)?;
             }
-            crate::ExprData::ListExpr { list, .. } => {
-                write!(self.writer, "[")?;
+            ExprData::ListExpr { list, .. } => {
+                self.write("[")?;
                 self.print_comma_separated(list.iter())?;
-                write!(self.writer, "]")?;
+                self.write("]")?;
             }
-            crate::ExprData::Literal {
+            ExprData::Literal {
                 token: Literal::String(decoded),
                 ..
-            } => write!(self.writer, "{}", quote(decoded))?,
-            crate::ExprData::Literal {
+            } => self.write(&quote(decoded))?,
+            ExprData::Literal {
                 token: Literal::Bytes(decoded),
                 ..
-            } => write!(self.writer, "{}", quote_bytes(decoded))?,
-            crate::ExprData::Literal {
+            } => self.write(&quote_bytes(decoded))?,
+            ExprData::Literal {
                 token: Literal::Int(int_value),
                 ..
-            } => write!(self.writer, "{}", int_value)?,
-            crate::ExprData::Literal {
+            } => self.write(&format!("{}", int_value))?,
+            ExprData::Literal {
                 token: Literal::BigInt(bigint_value),
                 ..
-            } => write!(self.writer, "{}", bigint_value)?,
-            crate::ExprData::Literal {
+            } => self.write(&format!("{}", bigint_value))?,
+            ExprData::Literal {
                 token: Literal::Float(float_value),
                 ..
-            } => write!(self.writer, "{}", float_value)?,
-            crate::ExprData::ParenExpr { x, .. } => {
-                write!(self.writer, "(")?;
+            } => self.write(&format!("{}", float_value))?,
+            ExprData::ParenExpr { x, .. } => {
+                self.write("(")?;
                 self.print_expr(x)?;
-                write!(self.writer, ")")?;
+                self.write(")")?;
             }
-            crate::ExprData::SliceExpr {
+            ExprData::SliceExpr {
                 x, lo, hi, step, ..
             } => {
                 self.print_expr(x)?;
-                write!(self.writer, "[")?;
+                self.write("[")?;
                 if let Some(lo) = lo {
                     self.print_expr(lo)?;
                 }
-                write!(self.writer, ":")?;
+                self.write(":")?;
                 if let Some(hi) = hi {
                     self.print_expr(hi)?;
                 }
                 if let Some(step) = step {
-                    write!(self.writer, ":")?;
+                    self.write(":")?;
                     self.print_expr(step)?;
                 }
-                write!(self.writer, "]")?;
+                self.write("]")?;
             }
-            crate::ExprData::TupleExpr { list, .. } => {
-                write!(self.writer, "(")?;
+            ExprData::TupleExpr { list, .. } => {
+                self.write("(")?;
                 self.print_comma_separated(list.iter())?;
-                write!(self.writer, ")")?;
+                self.write(")")?;
             }
-            crate::ExprData::UnaryExpr { op, x, .. } => {
-                write!(self.writer, "{}", op)?;
+            ExprData::UnaryExpr { op, x, .. } => {
+                self.write(&format!("{}", op))?;
                 if let Some(x) = x {
                     self.print_expr(x)?;
                 }
@@ -414,7 +546,81 @@ for x in foo():
 
         assert!(printer.print_file_unit().is_ok());
 
-        assert_that!(&src, eq(&w));
-        Ok(())
+        verify_that!(&w, eq(&src))
+    }
+
+    #[test]
+    fn test_long_line() -> googletest::prelude::Result<()> {
+        let src = "\
+def foo(we, have, a, definition, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines):
+    pass
+
+foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines)
+ 
+";
+        let bump = Bump::new();
+        let unit = parse_with_mode(&bump, &"<test>", &src, Mode::RetainComments)?;
+
+        let mut w = String::new();
+        let mut printer = Printer::new(unit, &mut w);
+
+        assert!(printer.print_file_unit().is_ok());
+
+        let expected = "\
+def foo(we, have, a, definition, that, has, many, parameters, it, should, be, broken, up, into,
+        multiple, lines):
+  pass
+
+foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up,
+    into, multiple, lines)
+";
+
+        verify_that!(&w, eq(&expected))
+    }
+
+    #[test]
+    fn test_long_line_break() -> googletest::prelude::Result<()> {
+        let src = "\
+def foo(we, have, a, definition, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines):
+    pass
+
+foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines)
+ 
+";
+        let bump = Bump::new();
+        let unit = parse_with_mode(&bump, &"<test>", &src, Mode::RetainComments)?;
+
+        let mut w = String::new();
+        let mut options = PrinterOptions::default();
+        options.split_module_fn_args = true;
+        let mut printer = Printer::new_with_options(unit, &mut w, options);
+
+        assert!(printer.print_file_unit().is_ok());
+
+        let expected = "\
+def foo(
+    we,
+    have,
+    a,
+    definition,
+    that,
+    has,
+    many,
+    parameters,
+    it,
+    should,
+    be,
+    broken,
+    up,
+    into,
+    multiple,
+    lines):
+  pass
+
+foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up,
+    into, multiple, lines)
+";
+
+        verify_that!(&w, eq(&expected))
     }
 }
