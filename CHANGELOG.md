@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.5] - 2025-04-25
+
+### 🚀 Features
+
+- pretty printing can wrap lines
+
 ## [0.4.3] - 2025-01-18
 
 ### 🚀 Features
