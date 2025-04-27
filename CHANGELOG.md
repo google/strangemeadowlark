@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.7] - 2025-04-27
+
+### ⚙️ Miscellaneous Tasks
+
+- refactor, fix clippy findings, remove `UNDEFINED_BINDING`
+
+## [0.4.6] - 2025-04-27
+
+### ⚙️ Miscellaneous Tasks
+
+- refactor, introduce Arena, hide bumpalo
+
 ## [0.4.5] - 2025-04-25
 
 ### 🚀 Features
