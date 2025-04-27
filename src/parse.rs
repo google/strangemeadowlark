@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::scan::*;
 use crate::syntax::{StmtData::*, *};
 use crate::token::*;
-use bumpalo::Bump;
+use crate::Arena;
 use thiserror::Error;
 
 // This file defines a recursive-descent parser for Starlark.
@@ -115,41 +115,46 @@ pub enum ParseError {
 /// Parse parses the input data, retunring FileUnit parse tree.
 ///
 /// The path is only used when recording position information in errors.
-pub fn parse_with_mode<'b, P: AsRef<Path>>(
-    bump: &'b Bump,
-    path: &'b P,
-    src: &'b str,
+pub fn parse_with_mode<'arena, P: AsRef<Path>>(
+    arena: &'arena Arena,
+    path: &'arena P,
+    src: &'arena str,
     mode: Mode,
-) -> Result<&'b FileUnit<'b>> {
-    let mut p = Parser::new(bump, path, src, mode)?;
+) -> Result<&'arena FileUnit<'arena>> {
+    let mut p = Parser::new(arena, path, src, mode)?;
     p.parse_file()
 }
 
 /// Convenience method that calls parse_with_mode with path "unknown" and Mode::Plain.
-pub fn parse<'b>(bump: &'b Bump, src: &'b str) -> Result<&'b FileUnit<'b>> {
-    parse_with_mode(bump, &UNKNOWN, src, Mode::Plain)
+pub fn parse<'arena>(arena: &'arena Arena, src: &'arena str) -> Result<&'arena FileUnit<'arena>> {
+    parse_with_mode(arena, &UNKNOWN, src, Mode::Plain)
 }
 
 /// Parses an expression, using path "unknown" and Mode::plain.
-pub fn parse_expr<'b>(bump: &'b Bump, src: &'b str) -> Result<ExprRef<'b>> {
-    let mut p = Parser::new(bump, &UNKNOWN, src, Mode::Plain)?;
+pub fn parse_expr<'arena>(arena: &'arena Arena, src: &'arena str) -> Result<ExprRef<'arena>> {
+    let mut p = Parser::new(arena, &UNKNOWN, src, Mode::Plain)?;
     p.parse_expr(false)
 }
 
-struct Parser<'a, 'b>
+struct Parser<'a, 'arena>
 where
-    'b: 'a,
+    'arena: 'a,
 {
-    sc: Scanner<'a, 'b>,
+    sc: Scanner<'a, 'arena>,
     tok: TokenValue,
     pos: Position,
-    bump: &'b Bump,
-    path: &'b Path,
+    arena: &'arena Arena,
+    path: &'arena Path,
 }
 
-impl<'a, 'b> Parser<'a, 'b> {
-    fn new<P: AsRef<Path>>(bump: &'b Bump, path: &'b P, src: &'b str, mode: Mode) -> Result<Self> {
-        let mut sc = Scanner::new(bump, path, src, mode == Mode::RetainComments)
+impl<'a, 'arena> Parser<'a, 'arena> {
+    fn new<P: AsRef<Path>>(
+        arena: &'arena Arena,
+        path: &'arena P,
+        src: &'arena str,
+        mode: Mode,
+    ) -> Result<Self> {
+        let mut sc = Scanner::new(arena, path, src, mode == Mode::RetainComments)
             .map_err(|e| ParseError::ScanError(e))?;
         // Read first lookahead token.
         let tok = sc.next_token().map_err(|e| ParseError::ScanError(e))?;
@@ -158,7 +163,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             sc,
             tok,
             pos,
-            bump,
+            arena,
             path: path.as_ref(),
         })
     }
@@ -192,9 +197,9 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     // file_input = (NEWLINE | stmt)* EOF
-    fn parse_file(&mut self) -> Result<&'b FileUnit<'b>>
+    fn parse_file(&mut self) -> Result<&'arena FileUnit<'arena>>
 where {
-        let mut stmts: Vec<StmtRef<'b>> = vec![];
+        let mut stmts: Vec<StmtRef<'arena>> = vec![];
         while self.tok.kind != Token::Eof {
             if self.tok.kind == Token::Newline {
                 self.next_token()?;
@@ -202,19 +207,19 @@ where {
             }
             self.parse_stmt(&mut stmts)?;
         }
-        let line_comments = &*self.bump.alloc_slice_copy(&self.sc.line_comments);
-        let suffix_comments = &*self.bump.alloc_slice_copy(&self.sc.suffix_comments);
+        let line_comments = &*self.arena.alloc_slice_copy(&self.sc.line_comments);
+        let suffix_comments = &*self.arena.alloc_slice_copy(&self.sc.suffix_comments);
 
-        let f = self.bump.alloc(FileUnit {
+        let f = self.arena.alloc(FileUnit {
             path: self.path,
-            stmts: self.bump.alloc_slice_copy(&stmts.into_boxed_slice()),
+            stmts: self.arena.alloc_slice_copy(&stmts.into_boxed_slice()),
             line_comments,
             suffix_comments,
         });
         Ok(f)
     }
 
-    fn parse_stmt(&mut self, stmts: &mut Vec<StmtRef<'b>>) -> Result<()> {
+    fn parse_stmt(&mut self, stmts: &mut Vec<StmtRef<'arena>>) -> Result<()> {
         match self.tok.kind {
             Token::Def => stmts.push(self.parse_def_stmt()?),
             Token::If => stmts.push(self.parse_if_stmt()?),
@@ -225,7 +230,7 @@ where {
         Ok(())
     }
 
-    fn parse_def_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_def_stmt(&mut self) -> Result<StmtRef<'arena>> {
         self.next_token()?; // consume DEF
         let def_pos = self.pos;
         let id = self.parse_ident()?;
@@ -236,7 +241,7 @@ where {
         let rparen = self.pos;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let stmt: &'b mut Stmt<'b> = self.bump.alloc(Stmt {
+        let stmt: &'arena mut Stmt<'arena> = self.arena.alloc(Stmt {
             span: Span {
                 start: def_pos,
                 end: def_pos,
@@ -254,13 +259,13 @@ where {
         Ok(stmt)
     }
 
-    fn parse_if_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_if_stmt(&mut self) -> Result<StmtRef<'arena>> {
         self.next_token()?;
         let if_pos = self.pos; // consume IF
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let if_stmt = self.bump.alloc(Stmt {
+        let if_stmt = self.arena.alloc(Stmt {
             span: Span {
                 start: if_pos,
                 end: if_pos,
@@ -281,7 +286,7 @@ where {
             let cond = self.parse_test()?;
             self.consume(Token::Colon)?;
             let body = self.parse_suite()?;
-            elifs.push(self.bump.alloc(Stmt {
+            elifs.push(self.arena.alloc(Stmt {
                 span: Span {
                     start: elif_pos,
                     end: elif_pos,
@@ -329,7 +334,7 @@ where {
                         ..
                     } => {
                         *else_pos = Some(tmp.span.start);
-                        *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
+                        *else_arm = self.arena.alloc_slice_copy(&[&*tmp]);
                         tmp = next_last_if;
                     }
                     _ => unreachable!(),
@@ -344,7 +349,7 @@ where {
                     ..
                 } => {
                     *else_pos = Some(tmp.span.start);
-                    *else_arm = self.bump.alloc_slice_copy(&[&*tmp]);
+                    *else_arm = self.arena.alloc_slice_copy(&[&*tmp]);
                 }
                 _ => unreachable!(),
             }
@@ -367,14 +372,14 @@ where {
         Ok(if_stmt)
     }
 
-    fn parse_for_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_for_stmt(&mut self) -> Result<StmtRef<'arena>> {
         let for_pos = self.next_token()?; // consume FOR
         let vars = self.parse_for_loop_vars()?;
         self.consume(Token::In)?;
         let x = self.parse_expr(false)?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let for_stmt = self.bump.alloc(Stmt {
+        let for_stmt = self.arena.alloc(Stmt {
             span: Span {
                 start: for_pos,
                 end: for_pos,
@@ -392,7 +397,7 @@ where {
     // Equivalent to 'exprlist' production in Python grammar.
     //
     // loop_variables = primary_with_suffix (COMMA primary_with_suffix)* COMMA?
-    fn parse_for_loop_vars(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_for_loop_vars(&mut self) -> Result<ExprRef<'arena>> {
         // Avoid parseExpr because it would consume the IN token
         // following x in "for x in y: ...".
         let v = self.parse_primary_with_suffix()?;
@@ -408,8 +413,8 @@ where {
             }
             list.push(self.parse_primary_with_suffix()?);
         }
-        let list = self.bump.alloc_slice_copy(&list.into_boxed_slice());
-        let for_loop_vars = self.bump.alloc(Expr {
+        let list = self.arena.alloc_slice_copy(&list.into_boxed_slice());
+        let for_loop_vars = self.arena.alloc(Expr {
             span: Span {
                 start: v.span.start,
                 end: v.span.start, /* todo */
@@ -423,12 +428,12 @@ where {
         Ok(&*for_loop_vars)
     }
 
-    fn parse_while_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_while_stmt(&mut self) -> Result<StmtRef<'arena>> {
         let while_pos = self.next_token()?; // consume WHILE
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let while_stmt = self.bump.alloc(Stmt {
+        let while_stmt = self.arena.alloc(Stmt {
             span: Span {
                 start: while_pos,
                 end: while_pos,
@@ -443,7 +448,7 @@ where {
     }
 
     // stmt = LOAD '(' STRING {',' (IDENT '=')? STRING} [','] ')'
-    fn parse_load_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_load_stmt(&mut self) -> Result<StmtRef<'arena>> {
         let load_pos = self.next_token()?; // consume LOAD
         self.consume(Token::LParen)?;
 
@@ -469,8 +474,8 @@ where {
                     // To name is same as original.
                     self.next_token()?;
                     let id = self
-                        .bump
-                        .alloc(Ident::new(self.tok.pos, self.bump.alloc_str(&decoded)));
+                        .arena
+                        .alloc(Ident::new(self.tok.pos, self.arena.alloc_str(&decoded)));
                     to.push(id);
                     from.push(id);
                 }
@@ -501,7 +506,7 @@ where {
                             token: Literal::String(decoded),
                             token_pos,
                             ..
-                        } => from.push(self.bump.alloc(Ident::new(*token_pos, decoded))),
+                        } => from.push(self.arena.alloc(Ident::new(*token_pos, decoded))),
                         _ => unreachable!(),
                     }
                 }
@@ -524,9 +529,9 @@ where {
             }
             .into());
         }
-        let to = self.bump.alloc_slice_copy(&to.into_boxed_slice());
-        let from = self.bump.alloc_slice_copy(&from.into_boxed_slice());
-        let load_stmt = self.bump.alloc(Stmt {
+        let to = self.arena.alloc_slice_copy(&to.into_boxed_slice());
+        let from = self.arena.alloc_slice_copy(&from.into_boxed_slice());
+        let load_stmt = self.arena.alloc(Stmt {
             span: Span {
                 start: load_pos,
                 end: load_pos,
@@ -544,7 +549,11 @@ where {
 
     // simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
     // In REPL mode, it does not consume the NEWLINE.
-    fn parse_simple_stmt(&mut self, stmts: &mut Vec<StmtRef<'b>>, consume_nl: bool) -> Result<()> {
+    fn parse_simple_stmt(
+        &mut self,
+        stmts: &mut Vec<StmtRef<'arena>>,
+        consume_nl: bool,
+    ) -> Result<()> {
         loop {
             stmts.push(self.parse_small_stmt()?);
             if self.tok.kind != Token::Semi {
@@ -569,7 +578,7 @@ where {
     //	| LOAD ...
     //	| expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') expr   // assign
     //	| expr
-    fn parse_small_stmt(&mut self) -> Result<StmtRef<'b>> {
+    fn parse_small_stmt(&mut self) -> Result<StmtRef<'arena>> {
         match self.tok.kind {
             Token::Return => {
                 let pos = self.next_token()?; // consume RETURN
@@ -580,7 +589,7 @@ where {
                 {
                     result = Some(self.parse_expr(false)?);
                 }
-                let return_stmt = self.bump.alloc(Stmt {
+                let return_stmt = self.arena.alloc(Stmt {
                     span: Span {
                         start: pos,
                         end: pos,
@@ -595,7 +604,7 @@ where {
             Token::Break | Token::Continue | Token::Pass => {
                 let tok = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume it
-                let branch_stmt = self.bump.alloc(Stmt {
+                let branch_stmt = self.arena.alloc(Stmt {
                     span: Span {
                         start: pos,
                         end: pos,
@@ -629,7 +638,7 @@ where {
                 let op = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume op
                 let rhs = self.parse_expr(false)?;
-                let assign_stmt = self.bump.alloc(Stmt {
+                let assign_stmt = self.arena.alloc(Stmt {
                     span: Span {
                         start: pos,
                         end: pos,
@@ -647,7 +656,7 @@ where {
         }
 
         // Expression statement (e.g. function call, doc string).
-        let expr_stmt = self.bump.alloc(Stmt {
+        let expr_stmt = self.arena.alloc(Stmt {
             span: Span {
                 start: pos,
                 end: pos,
@@ -658,7 +667,7 @@ where {
     }
 
     // parse_test parses a 'test', a single-component expression.
-    fn parse_test(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_test(&mut self) -> Result<ExprRef<'arena>> {
         if self.tok.kind == Token::Lambda {
             return self.parse_lambda(true);
         }
@@ -678,7 +687,7 @@ where {
             }
             let else_pos = self.next_token()?;
             let else_ = self.parse_test()?;
-            return Ok(self.bump.alloc(Expr {
+            return Ok(self.arena.alloc(Expr {
                 span: Span {
                     start: if_pos,
                     end: if_pos,
@@ -695,12 +704,12 @@ where {
         Ok(x)
     }
 
-    fn parse_ident(&mut self) -> Result<&'b Ident<'b>> {
+    fn parse_ident(&mut self) -> Result<&'arena Ident<'arena>> {
         match self.tok.kind.clone() {
             Token::Ident { name } => {
                 let id = self
-                    .bump
-                    .alloc(Ident::new(self.tok.pos, self.bump.alloc_str(&name)));
+                    .arena
+                    .alloc(Ident::new(self.tok.pos, self.arena.alloc_str(&name)));
                 self.next_token()?;
                 Ok(id)
             }
@@ -731,7 +740,7 @@ where {
     //	*Unary{Op: STAR}                                *
     //	*Unary{Op: STAR, X: *Ident}                     *args
     //	*Unary{Op: STARSTAR, X: *Ident}                 **kwargs
-    fn parse_params(&mut self) -> Result<&'b [ExprRef<'b>]> {
+    fn parse_params(&mut self) -> Result<&'arena [ExprRef<'arena>]> {
         //fn  parseParams() []Expr {
         let mut params = vec![];
         while self.tok.kind != Token::RParen
@@ -752,12 +761,12 @@ where {
                 let (x, end) =
                     if op == Token::StarStar || matches!(self.tok.kind, Token::Ident { .. }) {
                         let ident = self.parse_ident()?;
-                        let ident = self.bump.alloc(ident.as_expr());
+                        let ident = self.arena.alloc(ident.as_expr());
                         (Some(&*ident), self.pos)
                     } else {
                         (None, op_pos)
                     };
-                let unary_expr = self.bump.alloc(Expr {
+                let unary_expr = self.arena.alloc(Expr {
                     span: Span { start: op_pos, end },
                     data: ExprData::UnaryExpr { op_pos, op, x },
                 });
@@ -768,12 +777,12 @@ where {
             // IDENT
             // IDENT = test
             let id = self.parse_ident()?;
-            let id = self.bump.alloc(id.as_expr());
+            let id = self.arena.alloc(id.as_expr());
             if self.tok.kind == Token::Eq {
                 // default value
                 let eq = self.next_token()?;
                 let dflt = self.parse_test()?;
-                let binary_expr = self.bump.alloc(Expr {
+                let binary_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: id.span.start,
                         end: dflt.span.end,
@@ -791,7 +800,7 @@ where {
 
             params.push(&*id);
         }
-        let params = self.bump.alloc_slice_copy(&params.into_boxed_slice());
+        let params = self.arena.alloc_slice_copy(&params.into_boxed_slice());
         Ok(&*params)
     }
 
@@ -800,7 +809,7 @@ where {
     //
     // In many cases we must use parse_test to avoid ambiguity such as
     // f(x, y) vs. f((x, y)).
-    fn parse_expr(&mut self, in_parens: bool) -> Result<ExprRef<'b>> {
+    fn parse_expr(&mut self, in_parens: bool) -> Result<ExprRef<'arena>> {
         let x = self.parse_test()?;
         if self.tok.kind != Token::Comma {
             return Ok(x);
@@ -809,8 +818,8 @@ where {
         // tuple
         let mut exprs = vec![x];
         self.parse_exprs(&mut exprs, in_parens)?;
-        let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
-        let tuple_expr = self.bump.alloc(Expr {
+        let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
+        let tuple_expr = self.arena.alloc(Expr {
             span: Span {
                 start: x.span.start,
                 end: self.pos,
@@ -831,11 +840,11 @@ where {
     //	| '{' ...                    // dict literal or comprehension
     //	| '(' ...                    // tuple or parenthesized expression
     //	| ('-'|'+'|'~') primary_with_suffix
-    fn parse_primary(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_primary(&mut self) -> Result<ExprRef<'arena>> {
         match self.tok.kind {
             Token::Ident { .. } => {
                 let ident = self.parse_ident()?;
-                let ident_expr = self.bump.alloc(Expr {
+                let ident_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: ident.name_pos,
                         end: ident.name_pos,
@@ -853,7 +862,7 @@ where {
                 let literal_token = self.sc.literal_from_token(token);
                 let token_pos = self.pos;
                 let pos = self.next_token()?;
-                let literal = self.bump.alloc(Expr {
+                let literal = self.arena.alloc(Expr {
                     span: Span {
                         start: pos,
                         end: pos,
@@ -874,7 +883,7 @@ where {
                 if self.tok.kind == Token::RParen {
                     // empty tuple
                     let rparen = self.next_token()?;
-                    let tuple_expr = self.bump.alloc(Expr {
+                    let tuple_expr = self.arena.alloc(Expr {
                         span: Span {
                             start: lparen,
                             end: rparen,
@@ -889,7 +898,7 @@ where {
                 }
                 let e = self.parse_expr(true)?; // allow trailing comma
                 let rparen = self.consume(Token::RParen)?;
-                let paren_expr = self.bump.alloc(Expr {
+                let paren_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: lparen,
                         end: rparen,
@@ -907,7 +916,7 @@ where {
                 let tok = self.tok.kind.clone();
                 let pos = self.next_token()?;
                 let x = self.parse_primary_with_suffix()?;
-                let unary_expr = self.bump.alloc(Expr {
+                let unary_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: pos,
                         end: pos,
@@ -934,12 +943,12 @@ where {
     //	| '[' expr ']'
     //	| '[' expr expr_list ']'
     //	| '[' expr (FOR loop_variables IN expr)+ ']'
-    fn parse_list(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_list(&mut self) -> Result<ExprRef<'arena>> {
         let lbrack = self.next_token()?;
         if self.tok.kind == Token::RBrack {
             // empty List
             let rbrack = self.next_token()?;
-            let list_expr = self.bump.alloc(Expr {
+            let list_expr = self.arena.alloc(Expr {
                 span: Span {
                     start: lbrack,
                     end: rbrack,
@@ -967,8 +976,8 @@ where {
         }
 
         let rbrack = self.consume(Token::RBrack)?;
-        let list = self.bump.alloc_slice_copy(&exprs.into_boxed_slice());
-        let list_expr = self.bump.alloc(Expr {
+        let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
+        let list_expr = self.arena.alloc(Expr {
             span: Span {
                 start: lbrack,
                 end: rbrack,
@@ -986,12 +995,12 @@ where {
     //
     //	| '{' dict_entry_list '}'
     //	| '{' dict_entry FOR loop_variables IN expr '}'
-    fn parse_dict(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_dict(&mut self) -> Result<ExprRef<'arena>> {
         let lbrace = self.next_token()?;
         if self.tok.kind == Token::RBrace {
             // empty dict
             let rbrace = self.next_token()?;
-            let dict_expr = self.bump.alloc(Expr {
+            let dict_expr = self.arena.alloc(Expr {
                 span: Span {
                     start: lbrace,
                     end: rbrace,
@@ -1022,8 +1031,8 @@ where {
         }
 
         let rbrace = self.consume(Token::RBrace)?;
-        let list = self.bump.alloc_slice_copy(&entries.into_boxed_slice());
-        let dict_expr = self.bump.alloc(Expr {
+        let list = self.arena.alloc_slice_copy(&entries.into_boxed_slice());
+        let dict_expr = self.arena.alloc(Expr {
             span: Span {
                 start: lbrace,
                 end: rbrace,
@@ -1038,11 +1047,11 @@ where {
     }
 
     // dict_entry = test ':' test
-    fn parse_dict_entry(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_dict_entry(&mut self) -> Result<ExprRef<'arena>> {
         let k = self.parse_test()?;
         let colon = self.consume(Token::Colon)?;
         let v = self.parse_test()?;
-        let dict_entry = self.bump.alloc(Expr {
+        let dict_entry = self.arena.alloc(Expr {
             span: Span {
                 start: k.span.start,
                 end: v.span.end,
@@ -1061,7 +1070,7 @@ where {
     // expr_list = (',' expr)* ','?
     fn parse_exprs(
         &mut self,
-        exprs: &mut Vec<ExprRef<'b>>,
+        exprs: &mut Vec<ExprRef<'arena>>,
         allow_trailing_comma: bool,
     ) -> Result<()> {
         while self.tok.kind == Token::Comma {
@@ -1082,7 +1091,7 @@ where {
     }
 
     // call_suffix = '(' arg_list? ')'
-    fn parse_call_suffix(&mut self, func: ExprRef<'b>) -> Result<ExprRef<'b>> {
+    fn parse_call_suffix(&mut self, func: ExprRef<'arena>) -> Result<ExprRef<'arena>> {
         let lparen = self.consume(Token::LParen)?;
         let mut args: &[&Expr] = &[];
         let rparen = if self.tok.kind == Token::RParen {
@@ -1091,7 +1100,7 @@ where {
             args = self.parse_args()?;
             self.consume(Token::RParen)?
         };
-        let call_expr = self.bump.alloc(Expr {
+        let call_expr = self.arena.alloc(Expr {
             span: Span {
                 start: func.span.start,
                 end: rparen,
@@ -1108,7 +1117,7 @@ where {
 
     // parseLambda parses a lambda expression.
     // The allowCond flag allows the body to be an 'a if b else c' conditional.
-    fn parse_lambda(&mut self, allow_cond: bool) -> Result<ExprRef<'b>> {
+    fn parse_lambda(&mut self, allow_cond: bool) -> Result<ExprRef<'arena>> {
         let lambda_pos = self.next_token()?;
         let mut params: &[&Expr] = &[];
         if self.tok.kind != Token::Colon {
@@ -1122,7 +1131,7 @@ where {
             self.parse_test_no_cond()?
         };
 
-        let lambda_expr = self.bump.alloc(Expr {
+        let lambda_expr = self.arena.alloc(Expr {
             span: Span {
                 start: lambda_pos,
                 end: body.span.end,
@@ -1146,9 +1155,9 @@ where {
     fn parse_comprehension_suffix(
         &mut self,
         lbrace: Position,
-        body: ExprRef<'b>,
+        body: ExprRef<'arena>,
         end_brace: Token,
-    ) -> Result<ExprRef<'b>> {
+    ) -> Result<ExprRef<'arena>> {
         let mut clauses = vec![]; // []Node
         while self.tok.kind != end_brace {
             if self.tok.kind == Token::For {
@@ -1162,7 +1171,7 @@ where {
                 // - a lambda expression
                 // - an unparenthesized tuple.
                 let x = self.parse_test_prec(0)?;
-                let clause = self.bump.alloc(Clause::ForClause {
+                let clause = self.arena.alloc(Clause::ForClause {
                     for_pos,
                     vars,
                     in_pos,
@@ -1172,7 +1181,7 @@ where {
             } else if self.tok.kind == Token::If {
                 let if_pos = self.next_token()?;
                 let cond = self.parse_test_no_cond()?;
-                let clause = self.bump.alloc(Clause::IfClause { if_pos, cond });
+                let clause = self.arena.alloc(Clause::IfClause { if_pos, cond });
                 clauses.push(&*clause);
             } else {
                 return Err(ParseError::ComprehensionUnexpected {
@@ -1184,8 +1193,8 @@ where {
             }
         }
         let rbrace = self.next_token()?;
-        let clauses = self.bump.alloc_slice_copy(&clauses.into_boxed_slice());
-        let comprehension = self.bump.alloc(Expr {
+        let clauses = self.arena.alloc_slice_copy(&clauses.into_boxed_slice());
+        let comprehension = self.arena.alloc(Expr {
             span: Span {
                 start: lbrace,
                 end: rbrace,
@@ -1203,7 +1212,7 @@ where {
 
     // parse_testNoCond parses a a single-component expression without
     // consuming a trailing 'if expr else expr'.
-    fn parse_test_no_cond(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_test_no_cond(&mut self) -> Result<ExprRef<'arena>> {
         if self.tok.kind == Token::Lambda {
             self.parse_lambda(false)
         } else {
@@ -1211,7 +1220,7 @@ where {
         }
     }
 
-    fn parse_test_prec(&mut self, prec: usize) -> Result<ExprRef<'b>> {
+    fn parse_test_prec(&mut self, prec: usize) -> Result<ExprRef<'arena>> {
         if prec >= SUP_PREC {
             return self.parse_primary_with_suffix();
         }
@@ -1220,7 +1229,7 @@ where {
         if self.tok.kind == Token::Not && prec == Token::Not.precedence().unwrap() {
             let op_pos = self.next_token()?;
             let x = self.parse_test_prec(prec)?;
-            let unary_expr = self.bump.alloc(Expr {
+            let unary_expr = self.arena.alloc(Expr {
                 span: Span {
                     start: op_pos,
                     end: x.span.end,
@@ -1240,7 +1249,7 @@ where {
     // parseArgs parses a list of actual parameter values (arguments).
     // It mirrors the structure of parseParams.
     // arg_list = ((arg COMMA)* arg COMMA?)?
-    fn parse_args(&mut self) -> Result<&'b [ExprRef<'b>]> {
+    fn parse_args(&mut self) -> Result<&'arena [ExprRef<'arena>]> {
         let mut args = vec![];
         while self.tok.kind != Token::RParen && self.tok.kind != Token::Eof {
             if !args.is_empty() {
@@ -1255,7 +1264,7 @@ where {
                 let op = self.tok.kind.clone();
                 let op_pos = self.next_token()?;
                 let x = self.parse_test()?;
-                let unary_expr = self.bump.alloc(Expr {
+                let unary_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: op_pos,
                         end: x.span.end,
@@ -1286,7 +1295,7 @@ where {
                 }
                 let op_pos = self.next_token()?;
                 let y = self.parse_test()?;
-                x = self.bump.alloc(Expr {
+                x = self.arena.alloc(Expr {
                     span: Span {
                         start: x.span.start,
                         end: y.span.end,
@@ -1302,13 +1311,13 @@ where {
 
             args.push(x);
         }
-        let args = self.bump.alloc_slice_copy(&args.into_boxed_slice());
+        let args = self.arena.alloc_slice_copy(&args.into_boxed_slice());
         Ok(args)
     }
 
     // suite is typically what follows a COLON (e.g. after DEF or FOR).
     // suite = simple_stmt | NEWLINE INDENT stmt+ OUTDENT
-    fn parse_suite(&mut self) -> Result<&'b [StmtRef<'b>]> {
+    fn parse_suite(&mut self) -> Result<&'arena [StmtRef<'arena>]> {
         let mut stmts = vec![]; // []Stmt
         if self.tok.kind == Token::Newline {
             self.next_token()?; // consume NEWLINE
@@ -1320,13 +1329,13 @@ where {
         } else {
             self.parse_simple_stmt(&mut stmts, true)?;
         }
-        let stmts = self.bump.alloc_slice_copy(&stmts.into_boxed_slice());
+        let stmts = self.arena.alloc_slice_copy(&stmts.into_boxed_slice());
         Ok(&*stmts)
     }
 
     // expr = test (OP test)*
     // Uses precedence climbing; see http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm#climbing.
-    fn parse_binop_expr(&mut self, prec: usize) -> Result<ExprRef<'b>> {
+    fn parse_binop_expr(&mut self, prec: usize) -> Result<ExprRef<'arena>> {
         let mut x = self.parse_test_prec(prec + 1)?;
         let mut first = true;
         loop {
@@ -1349,7 +1358,7 @@ where {
             // Binary operator of specified precedence?
             let op_prec = self.tok.kind.precedence();
             if op_prec.is_none() || op_prec.unwrap() < prec {
-                let x = self.bump.alloc(x);
+                let x = self.arena.alloc(x);
                 return Ok(*x);
             }
             // Comparisons are non-associative.
@@ -1372,7 +1381,7 @@ where {
             let op = self.tok.kind.clone();
             let op_pos = self.next_token()?;
             let y = self.parse_test_prec(op_prec + 1)?;
-            let binary_expr = self.bump.alloc(Expr {
+            let binary_expr = self.arena.alloc(Expr {
                 span: Span {
                     start: x.span.start,
                     end: y.span.end,
@@ -1389,7 +1398,7 @@ where {
     //	| primary '.' IDENT
     //	| primary slice_suffix
     //	| primary call_suffix
-    fn parse_primary_with_suffix(&mut self) -> Result<ExprRef<'b>> {
+    fn parse_primary_with_suffix(&mut self) -> Result<ExprRef<'arena>> {
         let mut x = self.parse_primary()?;
         loop {
             match self.tok.kind {
@@ -1397,7 +1406,7 @@ where {
                     let dot = self.next_token()?;
                     let id = self.parse_ident()?;
                     let name_pos = self.pos;
-                    let dot_expr = self.bump.alloc(Expr {
+                    let dot_expr = self.arena.alloc(Expr {
                         span: Span {
                             start: x.span.start,
                             end: name_pos,
@@ -1419,7 +1428,7 @@ where {
     }
 
     // slice_suffix = '[' expr? ':' expr?  ':' expr? ']'
-    fn parse_slice_suffix(&mut self, x: ExprRef<'b>) -> Result<ExprRef<'b>> {
+    fn parse_slice_suffix(&mut self, x: ExprRef<'arena>) -> Result<ExprRef<'arena>> {
         let lbrack = self.next_token()?;
         let mut lo: Option<&Expr> = None;
         if self.tok.kind != Token::Colon {
@@ -1428,7 +1437,7 @@ where {
             // index x[y]
             if self.tok.kind == Token::RBrack {
                 let rbrack = self.next_token()?;
-                let index_expr = self.bump.alloc(Expr {
+                let index_expr = self.arena.alloc(Expr {
                     span: Span {
                         start: x.span.start,
                         end: rbrack,
@@ -1461,7 +1470,7 @@ where {
             }
         }
         let rbrack = self.consume(Token::RBrack)?;
-        let slice_expr = self.bump.alloc(Expr {
+        let slice_expr = self.arena.alloc(Expr {
             span: Span {
                 start: lbrack,
                 end: rbrack,
@@ -1493,8 +1502,8 @@ mod test {
 
     #[test]
     pub fn test_expr_parse_error() -> Result<()> {
-        let bump = Bump::new();
-        let x = parse_expr(&bump, "x(()");
+        let arena = Arena::new();
+        let x = parse_expr(&arena, "x(()");
         match x {
             Err(e @ ParseError::UnexpectedToken { .. }) => {
                 assert_that!(e.to_string(), eq("unknown:1:5 got eof, want )"));
@@ -1507,12 +1516,12 @@ mod test {
 
     struct TestCase {
         input: &'static str,
-        want: &'static str, //ExprRef<'b>,
+        want: &'static str, //ExprRef<'arena>,
     }
 
     #[test]
     pub fn test_expr_parse_trees() {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let test_cases = vec![
             TestCase {
                 input: "print(1)",
@@ -1633,7 +1642,7 @@ mod test {
                 want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))"}, // github.com/google/skylark/issues/53
                 ];
         for test_case in test_cases {
-            match super::parse_expr(&bump, test_case.input) {
+            match super::parse_expr(&arena, test_case.input) {
                 Ok(expr) => {
                     let s = format!("{}", expr.data);
                     assert_that!(s, eq(test_case.want))
@@ -1645,7 +1654,7 @@ mod test {
 
     #[test]
     fn test_stmt_parse_trees() -> googletest::prelude::Result<()> {
-        let bump = super::Bump::new();
+        let arena = super::Arena::new();
         let test_cases = vec![
             TestCase {
                 input: "print(1)",
@@ -1762,7 +1771,7 @@ def h():
               },
         ];
         for test_case in test_cases {
-            match super::parse(&bump, test_case.input) {
+            match super::parse(&arena, test_case.input) {
                 Ok(file_unit) if file_unit.stmts.len() >= 1 => {
                     let s = format!("{}", file_unit.stmts[0].data);
                     assert_that!(s, eq(test_case.want))
@@ -1776,11 +1785,11 @@ def h():
 
     #[test]
     fn test_retain_comments() -> googletest::prelude::Result<()> {
-        let bump = super::Bump::new();
+        let arena = Arena::new();
         let input = "# Hello world
 foo() #Suffix
 # Goodbye world";
-        let res = parse_with_mode(&bump, &"foo.star", input, Mode::RetainComments)?;
+        let res = parse_with_mode(&arena, &"foo.star", input, Mode::RetainComments)?;
         assert_that!(
             res.line_comments,
             eq(vec![

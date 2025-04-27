@@ -51,7 +51,7 @@ pub struct Stmt<'a> {
     pub data: StmtData<'a>,
 }
 
-impl<'a> PartialEq for Stmt<'a> {
+impl PartialEq for Stmt<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
     }
@@ -115,7 +115,7 @@ pub enum StmtData<'a> {
     },
 }
 
-impl<'a> PartialEq for StmtData<'a> {
+impl PartialEq for StmtData<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -242,7 +242,7 @@ impl<'a> PartialEq for StmtData<'a> {
     }
 }
 
-impl<'a> Display for StmtData<'a> {
+impl Display for StmtData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StmtData::AssignStmt { op, lhs, rhs, .. } => write!(
@@ -317,7 +317,7 @@ pub struct Expr<'a> {
     pub data: ExprData<'a>,
 }
 
-impl<'a> PartialEq for Expr<'a> {
+impl PartialEq for Expr<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
     }
@@ -419,7 +419,7 @@ pub enum ExprData<'a> {
     },
 }
 
-impl<'a> PartialEq for ExprData<'a> {
+impl PartialEq for ExprData<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -558,7 +558,7 @@ impl<'a> PartialEq for ExprData<'a> {
     }
 }
 
-impl<'a> Display for ExprData<'a> {
+impl Display for ExprData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExprData::BinaryExpr { x, op, y, .. } => {
@@ -674,7 +674,7 @@ pub enum Literal<'a> {
     Float(f64),
 }
 
-impl<'a> Display for Literal<'a> {
+impl Display for Literal<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::String(s) => write!(f, "{}", quote(s)),
@@ -686,7 +686,7 @@ impl<'a> Display for Literal<'a> {
     }
 }
 
-impl<'a> PartialEq for Literal<'a> {
+impl PartialEq for Literal<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::String(l0), Self::String(r0)) => l0 == r0,
@@ -699,7 +699,7 @@ impl<'a> PartialEq for Literal<'a> {
     }
 }
 
-impl<'a> Eq for Literal<'a> {}
+impl Eq for Literal<'_> {}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Ident<'a> {
@@ -710,7 +710,7 @@ pub struct Ident<'a> {
     pub binding: RefCell<Option<BindingIndex>>,
 }
 
-impl<'a> std::fmt::Debug for Ident<'a> {
+impl std::fmt::Debug for Ident<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ident")
             .field("name_pos", &self.name_pos)
@@ -767,7 +767,7 @@ pub enum Clause<'a> {
     },
 }
 
-impl<'a> Display for Clause<'a> {
+impl Display for Clause<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Clause::ForClause { vars, x, .. } => {

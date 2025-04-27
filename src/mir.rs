@@ -23,9 +23,8 @@ use std::sync::Mutex;
 use crate::binding::{BindingIndex, Module, Scope};
 use crate::scan::Position;
 use crate::value::{StarlarkType, Value};
+use crate::Arena;
 use crate::{ExprData, ExprRef, Ident, Literal, StmtData, StmtRef, Token};
-
-use bumpalo::Bump;
 
 /// Lowered representation of a function body.
 pub struct Lowered<'a> {
@@ -235,7 +234,7 @@ impl FuncDescriptor {
 }
 
 pub struct MirBuilder<'a, 'module> {
-    bump: &'a Bump,
+    arena: &'a Arena,
     module: &'module Module<'a>,
     locals: Vec<LocalDef<'a>>,
     blocks: Vec<BlockData>,
@@ -247,14 +246,14 @@ pub struct MirBuilder<'a, 'module> {
 }
 
 impl<'a, 'module> MirBuilder<'a, 'module> {
-    fn new(bump: &'a Bump, module: &'module Module<'a>) -> Self {
-        Self::with_offset(bump, module, 0)
+    fn new(arena: &'a Arena, module: &'module Module<'a>) -> Self {
+        Self::with_offset(arena, module, 0)
     }
 
-    fn with_offset(bump: &'a Bump, module: &'module Module<'a>, offset: usize) -> Self {
+    fn with_offset(arena: &'a Arena, module: &'module Module<'a>, offset: usize) -> Self {
         let b = BlockData::new();
         MirBuilder {
-            bump,
+            arena,
             module,
             locals: vec![],
             blocks: vec![b],
@@ -552,9 +551,9 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         let n = self.locals.len();
 
         // for debugging only
-        let name = self.bump.alloc_str(format!("_{}", n).as_str());
+        let name = self.arena.alloc_str(format!("_{}", n).as_str());
         self.locals.push(LocalDef {
-            name: Some(self.bump.alloc(Ident::new(Position::new(), name))),
+            name: Some(self.arena.alloc(Ident::new(Position::new(), name))),
         });
         Local(n as _)
     }
@@ -821,7 +820,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 // Translate the function's blocks
                 let block_offset = self.blocks.len();
                 let local_offset = self.locals.len();
-                let mut builder = Self::with_offset(&self.bump, self.module, self.blocks.len());
+                let mut builder = Self::with_offset(&self.arena, self.module, self.blocks.len());
                 builder.build_mir(f.borrow().unwrap());
                 self.funcs.insert(
                     func_index,
@@ -1371,19 +1370,19 @@ mod tests {
     use super::*;
     use anyhow::{anyhow, Result};
 
-    fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<FileUnitWithModule<'a>> {
-        let file_unit = parse(&bump, input)?;
-        resolve_file(file_unit, &bump, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
+    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<FileUnitWithModule<'a>> {
+        let file_unit = parse(&arena, input)?;
+        resolve_file(file_unit, &arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
     }
 
     #[test]
     fn test_empty() -> Result<()> {
-        let bump = Bump::new();
-        let fm = prepare(&bump, "def foo():\n  return\n")?;
+        let arena = Arena::new();
+        let fm = prepare(&arena, "def foo():\n  return\n")?;
         assert_eq!(fm.file_unit.stmts.len(), 1);
         match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
 
                 assert_eq!(builder.blocks.len(), 1);
@@ -1401,12 +1400,12 @@ mod tests {
 
     #[test]
     fn test_basic() -> Result<()> {
-        let bump = Bump::new();
-        let fm = prepare(&bump, "def foo(x):\n  return x + 2\n")?;
+        let arena = Arena::new();
+        let fm = prepare(&arena, "def foo(x):\n  return x + 2\n")?;
         assert_eq!(fm.file_unit.stmts.len(), 1);
         match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
 
                 builder.build_mir(f.borrow().unwrap());
 
@@ -1439,9 +1438,9 @@ mod tests {
 
     #[test]
     fn test_body() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let fm = prepare(
-            &bump,
+            &arena,
             "
 def fib(n):
   if n == 0:
@@ -1462,7 +1461,7 @@ def fib(n):
         assert_eq!(fm.file_unit.stmts.len(), 1);
         match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
                 assert_eq!(lowered.run(&[Value::Int(4)], &fm.module), Value::Int(5));
@@ -1475,9 +1474,9 @@ def fib(n):
 
     #[test]
     fn test_nested_nofree() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let fm = prepare(
-            &bump,
+            &arena,
             "
 def foo(x):
   def bar(y):
@@ -1492,7 +1491,7 @@ def foo(x):
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
                 assert_eq!(lowered.run(&[Value::Int(1)], &fm.module), Value::Int(2));
@@ -1504,9 +1503,9 @@ def foo(x):
 
     #[test]
     fn test_nested_simple() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let fm = prepare(
-            &bump,
+            &arena,
             "
 def foo(x):
   def bar():
@@ -1521,7 +1520,7 @@ def foo(x):
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
@@ -1534,9 +1533,9 @@ def foo(x):
 
     #[test]
     fn test_nested_cell() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let fm = prepare(
-            &bump,
+            &arena,
             "
 def foo(x):
   def bar(y):
@@ -1553,7 +1552,7 @@ def foo(x):
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
@@ -1566,12 +1565,12 @@ def foo(x):
 
     #[test]
     fn test_and_sanity() -> Result<()> {
-        let bump = Bump::new();
-        let fm = prepare(&bump, "def fooand(x, y):\n  return x and y\n")?;
+        let arena = Arena::new();
+        let fm = prepare(&arena, "def fooand(x, y):\n  return x and y\n")?;
         assert_eq!(fm.file_unit.stmts.len(), 1);
         match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
@@ -1600,12 +1599,12 @@ def foo(x):
 
     #[test]
     fn test_and_shortcut() -> Result<()> {
-        let bump = Bump::new();
-        let fm = prepare(&bump, "def fooshort(x):\n  return x and 1/0\n")?;
+        let arena = Arena::new();
+        let fm = prepare(&arena, "def fooshort(x):\n  return x and 1/0\n")?;
         assert_eq!(fm.file_unit.stmts.len(), 1);
         match &fm.file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&bump, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &fm.module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 

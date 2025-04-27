@@ -11,7 +11,7 @@ use crate::binding::{Binding, BindingIndex, Function, Module, Scope, UNDEFINED_B
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
-use bumpalo::Bump;
+use crate::Arena;
 use thiserror::Error;
 
 type Result<T> = std::result::Result<T, ResolveError>;
@@ -231,24 +231,24 @@ pub enum ResolveError {
 // to redefine it.
 pub fn resolve_file<'a>(
     file: &'a FileUnit<'a>,
-    bump: &'a Bump,
+    arena: &'a Arena,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
 ) -> std::result::Result<FileUnitWithModule<'a>, Vec<ResolveError>> {
-    repl_chunk(file, bump, None, is_predeclared, is_universal)
+    repl_chunk(file, arena, None, is_predeclared, is_universal)
 }
 
 // REPLChunk is a generalization of the File function that supports a
 // non-empty initial global block, as occurs in a REPL.
 pub fn repl_chunk<'a>(
     file_unit: &'a FileUnit<'a>,
-    bump: &'a Bump,
+    arena: &'a Arena,
     is_global: Option<fn(&str) -> bool>,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
 ) -> std::result::Result<FileUnitWithModule<'a>, Vec<ResolveError>> {
     let mut r = Resolver::new(
-        bump,
+        arena,
         file_unit.path,
         is_global,
         is_predeclared,
@@ -348,7 +348,7 @@ impl<'a> Block<'a> {
 }
 
 pub struct Resolver<'a> {
-    bump: &'a Bump,
+    arena: &'a Arena,
     path: &'a Path,
     // file = blocks[0]
     blocks: Vec<Block<'a>>,
@@ -380,14 +380,14 @@ pub struct Resolver<'a> {
 
 impl<'resolve, 'a> Resolver<'a> {
     fn new(
-        bump: &'a Bump,
+        arena: &'a Arena,
         path: &'a Path,
         is_global: Option<fn(&str) -> bool>,
         is_predeclared: fn(&str) -> bool,
         is_universal: fn(&str) -> bool,
     ) -> Self {
         Resolver {
-            bump,
+            arena,
             path,
             blocks: vec![Block::new_file()],
             bindings: RefCell::new(vec![]),
@@ -1084,7 +1084,7 @@ impl<'resolve, 'a> Resolver<'a> {
                 let mut p = 0;
                 let mut seen_name: HashSet<&str> = HashSet::new();
                 for arg in args.iter() {
-                    let pos = arg.span.start.clone();
+                    let pos = arg.span.start;
                     match arg.data {
                         ExprData::UnaryExpr {
                             op: Token::StarStar,
@@ -1213,7 +1213,7 @@ impl<'resolve, 'a> Resolver<'a> {
                     name: "lambda",
                     pos: e.span.start.clone(),
                     params,
-                    body: self.bump.alloc_slice_copy(&[&*self.bump.alloc(Stmt {
+                    body: self.arena.alloc_slice_copy(&[&*self.arena.alloc(Stmt {
                         span: e.span.clone(),
                         data: StmtData::ReturnStmt {
                             result: Some(body),
@@ -1362,7 +1362,7 @@ impl<'resolve, 'a> Resolver<'a> {
             } else if num_kwonly_params == 0 {
                 self.push_error(ResolveError::StarMustBeFollowedByKeywordOnlyParameters {
                     path: self.path_string(),
-                    pos: star.span.start.clone(),
+                    pos: star.span.start,
                 });
             }
         }
@@ -1419,16 +1419,16 @@ mod tests {
     use googletest::prelude::*;
 
     use crate::{parse, FileUnit, Mode};
-    fn prepare<'a>(bump: &'a Bump, input: &'a str) -> Result<FileUnitWithModule<'a>> {
-        let file_unit = parse(&bump, input)?;
-        resolve_file(file_unit, &bump, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
+    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<FileUnitWithModule<'a>> {
+        let file_unit = parse(&arena, input)?;
+        resolve_file(file_unit, &arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
     }
 
     #[test]
     fn basic_file_global() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "a = 3";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
 
         assert_eq!(f.module.globals.len(), 1);
         let bx = f.module.globals[0];
@@ -1445,9 +1445,9 @@ mod tests {
 
     #[test]
     fn basic_file_global_error() -> googletest::Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "a = 3\na = 4";
-        let f = prepare(&bump, input);
+        let f = prepare(&arena, input);
 
         // Expect error due to global reassign.
         verify_that!(f.is_err(), eq(true))
@@ -1489,9 +1489,9 @@ mod tests {
 
     #[test]
     fn basic_file_local() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "def f(b):\n  a = b\na = 2";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
 
         assert_eq!(f.module.globals.len(), 2);
         let bx = f.module.globals[0];
@@ -1512,9 +1512,9 @@ mod tests {
 
     #[test]
     fn load_comprehension_local() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "load('foo.sl', 'bar', baz='bak')\n[x for x in baz if bar]";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
 
         assert_eq!(f.module.locals.len(), 3);
         let bx = f.module.locals[0];
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn nestedvar() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "
 def nested(x):   # x has Scope::Cell
   def update(d): # has a freevar x
@@ -1551,7 +1551,7 @@ def nested(x):   # x has Scope::Cell
   update(e)
   return e
 ";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
         assert_eq!(f.module.globals.len(), 1);
         let bx = &f.module.globals[0];
         let b = &f.module.bindings[bx.0];
@@ -1664,7 +1664,7 @@ def nested(x):   # x has Scope::Cell
 
     #[test]
     fn test_body() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "
 def fib(n):
   if n == 0:
@@ -1680,20 +1680,20 @@ def fib(n):
     y = x + tmp
   return y
 ";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
         Ok(())
     }
 
     #[test]
     fn test_undefined() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "
 def fib(n):
   while i < n:
     n = i + 1
   return i
 ";
-        let f = prepare(&bump, input);
+        let f = prepare(&arena, input);
 
         if let Err(e) = f {
             Ok(())
@@ -1707,20 +1707,20 @@ def fib(n):
 
     #[test]
     fn test_weird_defined() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = "
 def spec_says_fails_at_runtime(n):
   while i < n:
     i = i + 1
   return i
 ";
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
         Ok(())
     }
 
     #[test]
     fn test_reference_local() -> Result<()> {
-        let bump = Bump::new();
+        let arena = Arena::new();
         let input = r#"
 load("foo.scl", "foo")
 
@@ -1729,7 +1729,7 @@ def bar(x):
 
 y = bar(1)
 "#;
-        let f = prepare(&bump, input)?;
+        let f = prepare(&arena, input)?;
         Ok(())
     }
 }

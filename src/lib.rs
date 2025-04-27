@@ -15,6 +15,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
+mod arena;
 pub mod binding;
 mod mir;
 mod parse;
@@ -27,6 +28,7 @@ mod token;
 mod value;
 mod walk;
 
+pub use arena::Arena;
 pub use mir::{Lowered, MirBuilder};
 pub use parse::{parse, parse_expr, parse_with_mode, Mode, ParseError};
 pub use print::Printer;

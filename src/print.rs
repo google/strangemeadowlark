@@ -517,8 +517,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{parse_with_mode, Mode};
-    use bumpalo::Bump;
+    use crate::{parse_with_mode, Arena, Mode};
     use googletest::prelude::*;
 
     #[test]
@@ -538,8 +537,8 @@ for x in foo():
   return {\"foo\": \"bar\"}
 
 ";
-        let bump = Bump::new();
-        let unit = parse_with_mode(&bump, &"<test>", &src, Mode::RetainComments)?;
+        let arena = Arena::new();
+        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
 
         let mut w = String::new();
         let mut printer = Printer::new(unit, &mut w);
@@ -558,8 +557,8 @@ def foo(we, have, a, definition, that, has, many, parameters, it, should, be, br
 foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines)
  
 ";
-        let bump = Bump::new();
-        let unit = parse_with_mode(&bump, &"<test>", &src, Mode::RetainComments)?;
+        let arena = Arena::new();
+        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
 
         let mut w = String::new();
         let mut printer = Printer::new(unit, &mut w);
@@ -587,8 +586,8 @@ def foo(we, have, a, definition, that, has, many, parameters, it, should, be, br
 foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, be, broken, up, into, multiple, lines)
  
 ";
-        let bump = Bump::new();
-        let unit = parse_with_mode(&bump, &"<test>", &src, Mode::RetainComments)?;
+        let arena = Arena::new();
+        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
 
         let mut w = String::new();
         let mut options = PrinterOptions::default();

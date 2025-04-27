@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use bumpalo::Bump;
 use std::{env, fs::read_to_string};
-use strangemeadowlark::{parse_with_mode, resolve_file, Mode, Printer};
+use strangemeadowlark::{parse_with_mode, resolve_file, Arena, Mode, Printer};
 
 // E.g. cargo run --example test_parse third_party/mangle/BUILD
 fn main() -> Result<()> {
@@ -25,9 +24,9 @@ fn main() -> Result<()> {
 
     let path = env::args().into_iter().nth(1).unwrap();
     let src = read_to_string(&path)?;
-    let bump = Bump::new();
-    let unit = parse_with_mode(&bump, &path, &src, Mode::RetainComments)?;
-    let _fm = resolve_file(unit, &bump, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
+    let arena = Arena::new();
+    let unit = parse_with_mode(&arena, &path, &src, Mode::RetainComments)?;
+    let _fm = resolve_file(unit, &arena, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
 
     for stmt in unit.stmts {
         println!("{}", stmt.data);

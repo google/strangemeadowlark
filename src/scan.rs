@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use crate::token::{keyword, IntValue, Token};
-use crate::Literal;
-use bumpalo::Bump;
+use crate::{Arena, Literal};
 use std::fmt::Display;
 use std::path::Path;
 use thiserror::Error;
@@ -98,19 +97,19 @@ pub struct Comment<'a> {
     pub text: &'a str, // without trailing newline
 }
 
-pub struct Scanner<'a, 'b> {
-    bump: &'b Bump,
+pub struct Scanner<'a, 'arena> {
+    arena: &'arena Arena,
     path: &'a Path,
     rest: &'a str,
-    pub token: &'a str,                        //  slice with current token
-    pub pos: Position,                         // current input position
-    depth: usize,                              // nesting of [ ] { } ( )
-    indentstk: Vec<usize>,                     // stack of indentation levels
+    pub token: &'a str,                                //  slice with current token
+    pub pos: Position,                                 // current input position
+    depth: usize,                                      // nesting of [ ] { } ( )
+    indentstk: Vec<usize>,                             // stack of indentation levels
     dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
     line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
     keep_comments: bool, // accumulate comments in slice
-    pub line_comments: Vec<&'b Comment<'b>>, // list of full line comments (if keepComments)
-    pub suffix_comments: Vec<&'b Comment<'b>>, // list of suffix comments (if keepComments)
+    pub line_comments: Vec<&'arena Comment<'arena>>, // list of full line comments (if keepComments)
+    pub suffix_comments: Vec<&'arena Comment<'arena>>, // list of suffix comments (if keepComments)
     token_buf: TokenValue,
 }
 
@@ -123,21 +122,21 @@ pub struct TokenValue {
 const TRIPLE_QUOTE: &str = "'''";
 const TRIPLE_DOUBLE_QUOTE: &str = "\"\"\"";
 
-impl<'a, 'b> Scanner<'a, 'b>
+impl<'a, 'arena> Scanner<'a, 'arena>
 where
-    'b: 'a,
+    'arena: 'a,
 {
     // The scanner operates on &str, advancing one char at a time.
     // path is only used in error messages.
     pub fn new<P: AsRef<Path>>(
-        bump: &'b Bump,
+        arena: &'arena Arena,
         path: &'a P,
         data: &'a str,
         keep_comments: bool,
-    ) -> Result<Scanner<'a, 'b>> {
+    ) -> Result<Scanner<'a, 'arena>> {
         //let pos = Position::new();//path.as_ref());
         Ok(Scanner {
-            bump,
+            arena,
             path: path.as_ref(),
             pos: Position::new(),
             indentstk: vec![0],
@@ -218,9 +217,9 @@ where
         self.next_token_internal().map(|()| self.token_buf.clone())
     }
 
-    pub fn literal_from_token(&self, token: Token) -> &'b Literal<'b> {
-        self.bump.alloc(match token {
-            Token::String { decoded } => Literal::String(self.bump.alloc_str(&decoded)),
+    pub fn literal_from_token(&self, token: Token) -> &'arena Literal<'arena> {
+        self.arena.alloc(match token {
+            Token::String { decoded } => Literal::String(self.arena.alloc_str(&decoded)),
             Token::Int {
                 decoded: IntValue::Int(n),
             } => Literal::Int(n),
@@ -332,14 +331,14 @@ where
                     if self.keep_comments {
                         self.mark_end_token();
                         if blank {
-                            self.line_comments.push(self.bump.alloc(Comment {
+                            self.line_comments.push(self.arena.alloc(Comment {
                                 start: comment_pos,
-                                text: self.bump.alloc_str(self.token),
+                                text: self.arena.alloc_str(self.token),
                             }))
                         } else {
-                            self.suffix_comments.push(self.bump.alloc(Comment {
+                            self.suffix_comments.push(self.arena.alloc(Comment {
                                 start: comment_pos,
-                                text: self.bump.alloc_str(self.token),
+                                text: self.arena.alloc_str(self.token),
                             }))
                         }
                     }
@@ -1097,8 +1096,8 @@ mod tests {
         use Token::*;
         let expected: Vec<Token> = vec![LBrace, LParen, LBrack, RBrack, RParen, RBrace, Eof];
         let mut tokens: Vec<Token> = vec![];
-        let bump = Bump::new();
-        let mut sc = Scanner::new(&bump, &"test", "{ ( [ ] ) }", false)?;
+        let arena = Arena::new();
+        let mut sc = Scanner::new(&arena, &"test", "{ ( [ ] ) }", false)?;
         while sc.token_buf.kind != Token::Eof {
             let tok = sc.next_token();
             assert!(tok.is_ok());
@@ -1193,8 +1192,8 @@ pass", "pass newline pass eof"), // consecutive newlines are consolidated
             ];
         for (input, want) in test_cases {
             let mut tokens = "".to_string();
-            let bump = Bump::new();
-            let sc = Scanner::new(&bump, &"test", input, false);
+            let arena = Arena::new();
+            let sc = Scanner::new(&arena, &"test", input, false);
             assert!(sc.is_ok());
             let mut sc = sc.expect("...");
             while sc.token_buf.kind != Token::Eof {

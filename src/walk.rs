@@ -240,8 +240,8 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
 #[cfg(test)]
 mod test {
 
+    use crate::Arena;
     use anyhow::Result;
-    use bumpalo::Bump;
     use std::path::Path;
 
     use crate::{
@@ -328,9 +328,9 @@ mod test {
                 Node::ExprRef(&three),
             ],
         }];
-        let bump = Bump::new();
+        let arena = Arena::new();
         for test_case in test_cases {
-            let res = parse(&bump, test_case.input)?;
+            let res = parse(&arena, test_case.input)?;
             let mut it = NodeIterator::new(Node::FileUnitRef(&res));
 
             let mut want_it = test_case.want.iter();
