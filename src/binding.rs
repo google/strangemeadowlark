@@ -37,13 +37,15 @@ pub struct Binding<'a> {
     pub first: Option<&'a Ident<'a>>,
 }
 
-pub const UNDEFINED_BINDING: Binding<'static> = Binding {
-    scope: RefCell::new(Scope::Undefined),
-    index: 0,
-    first: None,
-};
+impl Binding<'_> {
+    pub fn undefined() -> Self {
+        Binding {
+            scope: RefCell::new(Scope::Undefined),
+            index: 0,
+            first: None,
+        }
+    }
 
-impl<'a> Binding<'a> {
     pub fn get_scope(&self) -> Scope {
         *self.scope.borrow()
     }

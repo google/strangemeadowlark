@@ -1,5 +1,6 @@
 use bumpalo::Bump;
 
+#[derive(Default)]
 pub struct Arena {
     bump: Bump,
 }

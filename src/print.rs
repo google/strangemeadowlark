@@ -301,12 +301,9 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 result,
             } => {
                 self.write("return")?;
-                match result {
-                    Some(res) => {
-                        self.write(" ")?;
-                        self.print_expr(res)?
-                    }
-                    _ => {}
+                if let Some(res) = result {
+                    self.write(" ")?;
+                    self.print_expr(res)?
                 }
             }
         }

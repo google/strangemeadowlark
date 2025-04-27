@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::binding::{Binding, BindingIndex, Function, Module, Scope, UNDEFINED_BINDING};
+use crate::binding::{Binding, BindingIndex, Function, Module, Scope};
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
@@ -378,10 +378,10 @@ pub struct Resolver<'a> {
     errors: RefCell<Vec<ResolveError>>,
 }
 
-impl<'resolve, 'a> Resolver<'a> {
+impl<'arena> Resolver<'arena> {
     fn new(
-        arena: &'a Arena,
-        path: &'a Path,
+        arena: &'arena Arena,
+        path: &'arena Path,
         is_global: Option<fn(&str) -> bool>,
         is_predeclared: fn(&str) -> bool,
         is_universal: fn(&str) -> bool,
@@ -409,24 +409,24 @@ impl<'resolve, 'a> Resolver<'a> {
         self.path.to_string_lossy().to_string()
     }
 
-    fn push_block(&mut self, block: Block<'a>) -> usize {
+    fn push_block(&mut self, block: Block<'arena>) -> usize {
         let index = self.blocks.len();
         self.blocks[block.parent].children.borrow_mut().push(index);
         self.blocks.push(block);
         index
     }
 
-    fn block(&self, index: usize) -> &Block<'a> {
+    fn block(&self, index: usize) -> &Block<'arena> {
         &self.blocks[index]
     }
 
-    fn new_binding(&self, b: Binding<'a>) -> BindingIndex {
+    fn new_binding(&self, b: Binding<'arena>) -> BindingIndex {
         let index = self.bindings.borrow().len();
         self.bindings.borrow_mut().push(b);
         BindingIndex(index)
     }
 
-    fn push_module_local(&self, id: &'a Ident<'a>) -> BindingIndex {
+    fn push_module_local(&self, id: &'arena Ident<'arena>) -> BindingIndex {
         let bindx = self.new_binding(Binding {
             first: Some(id),
             scope: RefCell::new(Scope::Local),
@@ -436,7 +436,7 @@ impl<'resolve, 'a> Resolver<'a> {
         bindx
     }
 
-    fn push_module_global(&self, id: &'a Ident<'a>) -> BindingIndex {
+    fn push_module_global(&self, id: &'arena Ident<'arena>) -> BindingIndex {
         let bindx = self.new_binding(Binding {
             first: Some(id),
             scope: RefCell::new(Scope::Global),
@@ -450,7 +450,7 @@ impl<'resolve, 'a> Resolver<'a> {
     // block.  It resolves all uses of locals/cells within that block.
     fn resolve_local_uses(&mut self, index: usize) {
         let b = self.block(index);
-        let mut unresolved: Vec<Use<'a>> = vec![];
+        let mut unresolved: Vec<Use<'arena>> = vec![];
         for u in b.uses.borrow_mut().drain(..) {
             match self.lookup_local(&u) {
                 Some(bindx) => {
@@ -468,23 +468,20 @@ impl<'resolve, 'a> Resolver<'a> {
     }
 
     // lookupLocal looks up an identifier within its immediately enclosing function.
-    fn lookup_local<'b>(&self, u: &'b Use) -> Option<BindingIndex> {
+    fn lookup_local(&self, u: &Use) -> Option<BindingIndex> {
         let mut env = u.env;
         let mut b = self.block(env);
         loop {
-            match b.bindings.borrow().get(u.id.name) {
-                Some(bindx) => {
-                    let bind = &self.bindings.borrow()[bindx.0];
-                    if bind.get_scope() == Scope::Free {
-                        // shouldn't exist till later
-                        panic!(
-                            "{}: internal error: {}, {:?}",
-                            u.id.name_pos, u.id.name, bind
-                        )
-                    }
-                    return Some(*bindx);
+            if let Some(bindx) = b.bindings.borrow().get(u.id.name) {
+                let bind = &self.bindings.borrow()[bindx.0];
+                if bind.get_scope() == Scope::Free {
+                    // shouldn't exist till later
+                    panic!(
+                        "{}: internal error: {}, {:?}",
+                        u.id.name_pos, u.id.name, bind
+                    )
                 }
-                _ => {}
+                return Some(*bindx);
             }
 
             if b.function.is_some() {
@@ -498,13 +495,13 @@ impl<'resolve, 'a> Resolver<'a> {
                 break;
             }
         }
-        return None;
+        None
     }
 
     // lookup_lexical looks up an identifier use.id within its lexically enclosing environment.
     // The use.env field captures the original environment for error reporting.
     // This function can update scope as a side-effect.
-    fn lookup_lexical(&self, u: Use<'a>, env: usize) -> Option<BindingIndex> {
+    fn lookup_lexical(&self, u: Use<'arena>, env: usize) -> Option<BindingIndex> {
         if DEBUG {
             println!("lookupLexical {} in {:?} = ...", u.id.name, env);
         }
@@ -528,9 +525,9 @@ impl<'resolve, 'a> Resolver<'a> {
 
         // Defined in parent block?
         let bindx = self.lookup_lexical(u, b.parent);
-        if bindx.is_none() {
-            return None;
-        }
+        // If not, we are done.
+        bindx?;
+
         let mut bindx = bindx.unwrap();
         let mut binding_to_add: Option<Binding> = None;
         {
@@ -555,7 +552,7 @@ impl<'resolve, 'a> Resolver<'a> {
                         )
                     }
                     binding_to_add = Some(Binding {
-                        first: bind.first.clone(),
+                        first: bind.first,
                         scope: RefCell::new(Scope::Free),
                         index,
                     });
@@ -575,13 +572,13 @@ impl<'resolve, 'a> Resolver<'a> {
         Some(bindx)
     }
 
-    fn stmts(&mut self, env: usize, stmts: &'a [StmtRef<'a>]) {
+    fn stmts(&mut self, env: usize, stmts: &'arena [StmtRef<'arena>]) {
         for stmt in stmts {
             self.stmt(env, stmt);
         }
     }
 
-    fn stmt(&mut self, env: usize, stmt: StmtRef<'a>) {
+    fn stmt(&mut self, env: usize, stmt: StmtRef<'arena>) {
         match &stmt.data {
             StmtData::ExprStmt { x } => self.expr(env, x),
 
@@ -589,7 +586,7 @@ impl<'resolve, 'a> Resolver<'a> {
                 if self.loops == 0 && (*token == Token::Break || *token == Token::Continue) {
                     self.push_error(ResolveError::BranchNotInLoop {
                         path: self.path_string(),
-                        pos: token_pos.clone(),
+                        pos: *token_pos,
                         token: token.clone(),
                     })
                 }
@@ -602,15 +599,15 @@ impl<'resolve, 'a> Resolver<'a> {
                 else_pos,
                 else_arm,
             } => {
-                if let None = self.container(env).function {
+                if self.container(env).function.is_none() {
                     self.errors
                         .borrow_mut()
                         .push(ResolveError::IfNotWithinFunction {
                             path: self.path_string(),
-                            pos: if_pos.clone(),
+                            pos: *if_pos,
                         })
                 }
-                self.expr(env, &cond);
+                self.expr(env, cond);
                 self.ifstmts += 1;
                 self.stmts(env, then_arm);
                 self.stmts(env, else_arm);
@@ -751,7 +748,7 @@ impl<'resolve, 'a> Resolver<'a> {
         }
     }
 
-    fn assign(&mut self, env: usize, lhs: &'a Expr<'a>, is_augmented: bool) {
+    fn assign(&mut self, env: usize, lhs: &'arena Expr<'arena>, is_augmented: bool) {
         match lhs.data {
             ExprData::Ident(id) => {
                 // x = ...
@@ -804,7 +801,7 @@ impl<'resolve, 'a> Resolver<'a> {
     // container returns the innermost enclosing "container" block:
     // a function (function != nil) or file (function == nil).
     // Container blocks accumulate local variable bindings.
-    fn container(&self, mut env: usize) -> &Block<'a> {
+    fn container(&self, mut env: usize) -> &Block<'arena> {
         let mut b = self.block(env);
         loop {
             if b.function.is_some() || env == FILE_BLOCK
@@ -826,7 +823,7 @@ impl<'resolve, 'a> Resolver<'a> {
     // binding already exists, unless AllowGlobalReassign.
     // It sets id.Binding to the binding (whether old or new),
     // and returns whether a binding already existed.
-    fn bind(&mut self, env: usize, id: &'a Ident<'a>) -> bool {
+    fn bind(&mut self, env: usize, id: &'arena Ident<'arena>) -> bool {
         // Binding outside any local (comprehension/function) block?
         if env == FILE_BLOCK {
             let file = self.block(FILE_BLOCK);
@@ -838,18 +835,15 @@ impl<'resolve, 'a> Resolver<'a> {
                         e.insert(bindx);
                         (bindx, false)
                     }
-                    Entry::Occupied(e) => (e.get().clone(), true),
+                    Entry::Occupied(e) => (*e.get(), true),
                 },
                 Some(bindx) => (*bindx, true),
             };
             if !ok {
-                match self.globals.borrow_mut().entry(id.name) {
-                    Entry::Vacant(e) => {
-                        // first global binding of this name
-                        bindx = self.push_module_global(id);
-                        e.insert(bindx);
-                    }
-                    _ => {}
+                if let Entry::Vacant(e) = self.globals.borrow_mut().entry(id.name) {
+                    // first global binding of this name
+                    bindx = self.push_module_global(id);
+                    e.insert(bindx);
                 }
             }
             // Assuming !self.options.GlobalReassign
@@ -859,7 +853,7 @@ impl<'resolve, 'a> Resolver<'a> {
                     self.push_error(ResolveError::GlobalReassign {
                         path: self.path_string(),
                         pos: id.name_pos,
-                        scope: bind.scope.borrow().clone(),
+                        scope: *bind.scope.borrow(),
                         name: id.name.to_string(),
                         first: first.name_pos,
                     })
@@ -869,11 +863,11 @@ impl<'resolve, 'a> Resolver<'a> {
             return ok;
         }
 
-        return self.bind_local(env, &id);
+        self.bind_local(env, id)
     }
 
     /// Returns true if a binding already existed for this name.
-    fn bind_local(&mut self, env: usize, id: &'a Ident<'a>) -> bool {
+    fn bind_local(&mut self, env: usize, id: &'arena Ident<'arena>) -> bool {
         let b = self.block(env);
         // Mark this name as local to current block.
         // Assign it a new local (positive) index in the current container.
@@ -895,10 +889,10 @@ impl<'resolve, 'a> Resolver<'a> {
         }
 
         self.r#use(env, id);
-        return ok;
+        ok
     }
 
-    fn r#use(&self, env: usize, id: &'a Ident<'a>) {
+    fn r#use(&self, env: usize, id: &'arena Ident<'arena>) {
         let u = Use { id, env };
         let b = self.container(env);
         let uses: &mut Vec<Use> = &mut b.uses.borrow_mut();
@@ -907,7 +901,7 @@ impl<'resolve, 'a> Resolver<'a> {
 
     // use_top_level resolves u.id as a reference to a name visible at top-level.
     // The u.env field captures the original environment for error reporting.
-    fn use_top_level(&self, u: Use<'a>) -> Option<BindingIndex> {
+    fn use_top_level(&self, u: Use<'arena>) -> Option<BindingIndex> {
         let is_global = if let Some(is_global) = self.is_global {
             is_global
         } else {
@@ -956,7 +950,7 @@ impl<'resolve, 'a> Resolver<'a> {
                 self.predeclared.borrow_mut().insert(id.name, bindx); // save it
                 bindx
             } else {
-                id.set_binding(self.new_binding(UNDEFINED_BINDING));
+                id.set_binding(self.new_binding(Binding::undefined()));
                 self.push_error(ResolveError::Undefined {
                     path: self.path_string(),
                     pos: id.name_pos,
@@ -966,10 +960,10 @@ impl<'resolve, 'a> Resolver<'a> {
                 return None;
             };
         id.set_binding(bindx);
-        return Some(bindx);
+        Some(bindx)
     }
 
-    fn expr(&mut self, env: usize, e: ExprRef<'a>) {
+    fn expr(&mut self, env: usize, e: ExprRef<'arena>) {
         match &e.data {
             ExprData::Ident(id) => self.r#use(env, id),
 
@@ -1026,7 +1020,7 @@ impl<'resolve, 'a> Resolver<'a> {
                     // Locals defined within the block will be allotted
                     // distinct slots in the locals array of the innermost
                     // enclosing container (function/module) block.
-                    let env = self.push_block(Block::from_comp(env, &comp));
+                    let env = self.push_block(Block::from_comp(env, comp));
 
                     let is_augmented = false;
                     self.assign(env, vars, is_augmented);
@@ -1173,7 +1167,7 @@ impl<'resolve, 'a> Resolver<'a> {
                                         pos,
                                     },
                                 )
-                            } else if seen_name.len() > 0 {
+                            } else if !seen_name.is_empty() {
                                 self.push_error(
                                     ResolveError::PositionalArgumentMayNotFollowNamed {
                                         path: self.path_string(),
@@ -1211,13 +1205,13 @@ impl<'resolve, 'a> Resolver<'a> {
                 let fun_index = self.functions.borrow().len();
                 self.functions.borrow_mut().push(Function {
                     name: "lambda",
-                    pos: e.span.start.clone(),
+                    pos: e.span.start,
                     params,
                     body: self.arena.alloc_slice_copy(&[&*self.arena.alloc(Stmt {
-                        span: e.span.clone(),
+                        span: e.span,
                         data: StmtData::ReturnStmt {
                             result: Some(body),
-                            return_pos: e.span.start.clone(),
+                            return_pos: e.span.start,
                         },
                     })]),
                     has_kwargs: RefCell::new(false),
@@ -1236,15 +1230,14 @@ impl<'resolve, 'a> Resolver<'a> {
     }
 
     fn function(&mut self, env: usize, fun_index: usize) {
-        let params: &[&Expr<'a>] = {
+        let params: &[&Expr<'arena>] = {
             let fun = &self.functions.borrow()[fun_index];
             fun.params
         };
         // Resolve defaults in enclosing environment.
-        for param in params.into_iter() {
-            match param.data {
-                ExprData::BinaryExpr { y, .. } => self.expr(env, y),
-                _ => {}
+        for param in params.iter() {
+            if let ExprData::BinaryExpr { y, .. } = param.data {
+                self.expr(env, y);
             }
         }
 
@@ -1404,9 +1397,8 @@ impl<'resolve, 'a> Resolver<'a> {
         }
         let uses = b.uses.borrow();
         for u in uses.iter().copied() {
-            match self.lookup_lexical(u, u.env) {
-                Some(b) => u.id.set_binding(b),
-                _ => {}
+            if let Some(b) = self.lookup_lexical(u, u.env) {
+                u.id.set_binding(b);
             }
         }
     }

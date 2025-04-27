@@ -72,7 +72,7 @@ pub enum ScanError {
 }
 
 // A Position describes the location of a rune of input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Position {
     pub line: u32, // 1-based line number; 0 if line unknown
     pub col: u32,  // 1-based column (rune) number; 0 if column unknown
@@ -400,8 +400,7 @@ where
                         return Err(ScanError::StrayBackslash {
                             path: self.path_string(),
                             pos: self.pos,
-                        }
-                        .into());
+                        });
                     }
                     self.read();
                     break 'start;

@@ -203,7 +203,7 @@ struct LocalDef<'a> {
     name: Option<&'a Ident<'a>>,
 }
 
-impl<'a> Display for LocalDef<'a> {
+impl Display for LocalDef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.name {
             Some(Ident { name: id, .. }) => write!(f, "{}", id),
@@ -212,7 +212,7 @@ impl<'a> Display for LocalDef<'a> {
     }
 }
 
-impl<'a> std::fmt::Debug for LocalDef<'a> {
+impl std::fmt::Debug for LocalDef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
     }
@@ -675,7 +675,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
             write!(s, "Block {} ;;", i).expect("could not write block");
             match &b.function_info {
                 Some(info) => writeln!(s, " function {}", info).unwrap(),
-                _ => writeln!(s, "").unwrap(),
+                _ => writeln!(s).unwrap(),
             };
             for instr in &b.instructions {
                 writeln!(s, "  {:?}", instr).expect("could not write instruction");
@@ -790,7 +790,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 for bindx in func.free_vars.borrow().iter() {
                     let bind = self.module.binding(bindx);
                     let tmp = self.create_tmp();
-                    let place = match bind.get_scope() {
+                    match bind.get_scope() {
                         Scope::Cell => {
                             let place = Place::from_local(self.local(bind.first.unwrap()));
                             self.push_instr(Instruction::Assign(
@@ -820,7 +820,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 // Translate the function's blocks
                 let block_offset = self.blocks.len();
                 let local_offset = self.locals.len();
-                let mut builder = Self::with_offset(&self.arena, self.module, self.blocks.len());
+                let mut builder = Self::with_offset(self.arena, self.module, self.blocks.len());
                 builder.build_mir(f.borrow().unwrap());
                 self.funcs.insert(
                     func_index,
@@ -867,7 +867,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
                 self.push_instr(Instruction::Assign(
                     Place::from_local(next),
-                    Rvalue::UnaryOp(UnOp::IteratorNext, Operand::Local(Local::from(iter))),
+                    Rvalue::UnaryOp(UnOp::IteratorNext, Operand::Local(iter)),
                 ));
 
                 let test = self.create_tmp();
@@ -1212,7 +1212,7 @@ impl<'a> Lowered<'a> {
                         Value::Tuple(elems) => match (&elems[0], &elems[1..]) {
                             (Value::FuncRef(func_index), values) => {
                                 let mut cells = vec![];
-                                for v in values.into_iter() {
+                                for v in values.iter() {
                                     match v {
                                         Value::Cell(cell) => cells.push(cell.clone()),
                                         _ => todo!(),

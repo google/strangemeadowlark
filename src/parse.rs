@@ -136,18 +136,15 @@ pub fn parse_expr<'arena>(arena: &'arena Arena, src: &'arena str) -> Result<Expr
     p.parse_expr(false)
 }
 
-struct Parser<'a, 'arena>
-where
-    'arena: 'a,
-{
-    sc: Scanner<'a, 'arena>,
+struct Parser<'arena> {
+    sc: Scanner<'arena, 'arena>,
     tok: TokenValue,
     pos: Position,
     arena: &'arena Arena,
     path: &'arena Path,
 }
 
-impl<'a, 'arena> Parser<'a, 'arena> {
+impl<'arena> Parser<'arena> {
     fn new<P: AsRef<Path>>(
         arena: &'arena Arena,
         path: &'arena P,
@@ -155,9 +152,9 @@ impl<'a, 'arena> Parser<'a, 'arena> {
         mode: Mode,
     ) -> Result<Self> {
         let mut sc = Scanner::new(arena, path, src, mode == Mode::RetainComments)
-            .map_err(|e| ParseError::ScanError(e))?;
+            .map_err(ParseError::ScanError)?;
         // Read first lookahead token.
-        let tok = sc.next_token().map_err(|e| ParseError::ScanError(e))?;
+        let tok = sc.next_token().map_err(ParseError::ScanError)?;
         let pos = sc.pos;
         Ok(Parser {
             sc,
@@ -175,7 +172,7 @@ impl<'a, 'arena> Parser<'a, 'arena> {
     /// advances the scanner and returns the position of the previous token.
     fn next_token(&mut self) -> Result<Position> {
         let old_pos = self.sc.pos;
-        self.tok = self.sc.next_token().map_err(|e| ParseError::ScanError(e))?;
+        self.tok = self.sc.next_token().map_err(ParseError::ScanError)?;
         self.pos = old_pos;
         if DEBUG {
             println!("next_token: {} {}", self.tok.kind, self.pos);
@@ -190,8 +187,7 @@ impl<'a, 'arena> Parser<'a, 'arena> {
                 pos: self.tok.pos,
                 actual: self.tok.kind.clone(),
                 expected,
-            }
-            .into());
+            });
         }
         self.next_token()
     }
@@ -456,8 +452,7 @@ where {
             return Err(ParseError::LoadFirstArgMustBeString {
                 path: self.path_string(),
                 pos: self.pos,
-            }
-            .into());
+            });
         }
         let module = self.parse_primary()?; // .(*Literal)
 
@@ -488,8 +483,7 @@ where {
                             path: self.path_string(),
                             pos: self.pos,
                             name,
-                        }
-                        .into());
+                        });
                     }
                     self.consume(Token::Eq)?;
                     if !matches!(self.tok.kind, Token::String { .. }) {
@@ -497,8 +491,7 @@ where {
                             path: self.path_string(),
                             pos: self.pos,
                             name,
-                        }
-                        .into());
+                        });
                     }
                     let lit = self.parse_primary()?; // .(*Literal)
                     match &lit.data {
@@ -515,8 +508,7 @@ where {
                         path: self.path_string(),
                         pos: self.pos,
                         actual: self.tok.kind.clone(),
-                    }
-                    .into())
+                    })
                 }
             }
         }
@@ -526,8 +518,7 @@ where {
             return Err(ParseError::LoadMustImport {
                 path: self.path_string(),
                 pos: self.pos,
-            }
-            .into());
+            });
         }
         let to = self.arena.alloc_slice_copy(&to.into_boxed_slice());
         let from = self.arena.alloc_slice_copy(&from.into_boxed_slice());
@@ -682,8 +673,7 @@ where {
                 return Err(ParseError::ConditionalWithoutElse {
                     path: self.path_string(),
                     pos: if_pos,
-                }
-                .into());
+                });
             }
             let else_pos = self.next_token()?;
             let else_ = self.parse_test()?;
@@ -717,8 +707,7 @@ where {
                 path: self.path_string(),
                 pos: self.pos,
                 actual: tok,
-            }
-            .into()),
+            }),
         }
     }
 
@@ -933,8 +922,7 @@ where {
                 path: self.path_string(),
                 pos: self.pos,
                 actual: self.tok.kind.clone(),
-            }
-            .into()),
+            }),
         }
     }
 
@@ -1080,8 +1068,7 @@ where {
                     return Err(ParseError::UnparenthesizedTupleWithTrailingComma {
                         path: self.path_string(),
                         pos: self.pos,
-                    }
-                    .into());
+                    });
                 }
                 break;
             }
@@ -1188,8 +1175,7 @@ where {
                     path: self.path_string(),
                     pos: self.pos,
                     actual: self.tok.kind.clone(),
-                }
-                .into());
+                });
             }
         }
         let rbrace = self.next_token()?;
@@ -1290,8 +1276,7 @@ where {
                     return Err(ParseError::KeywordArgForm {
                         path: self.path_string(),
                         pos: self.pos,
-                    }
-                    .into());
+                    });
                 }
                 let op_pos = self.next_token()?;
                 let y = self.parse_test()?;
@@ -1349,8 +1334,7 @@ where {
                         pos: self.pos,
                         actual: self.tok.kind.clone(),
                         expected: Token::In,
-                    }
-                    .into());
+                    });
                 }
                 self.tok.kind = Token::NotIn;
             }
@@ -1370,8 +1354,7 @@ where {
                             pos: self.pos,
                             first: op.clone(),
                             second: self.tok.kind.clone(),
-                        }
-                        .into())
+                        })
                     }
                     _ => unreachable!(),
                 }
