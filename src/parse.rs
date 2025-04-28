@@ -237,12 +237,12 @@ where {
         let rparen = self.pos;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let stmt: &'arena mut Stmt<'arena> = self.arena.alloc(Stmt {
-            span: Span {
+        Ok(self.arena.stmt(
+            Span {
                 start: def_pos,
                 end: def_pos,
             },
-            data: DefStmt {
+            DefStmt {
                 def_pos,
                 name: id,
                 lparen,
@@ -251,8 +251,7 @@ where {
                 body,
                 function: RefCell::new(None),
             },
-        });
-        Ok(stmt)
+        ))
     }
 
     fn parse_if_stmt(&mut self) -> Result<StmtRef<'arena>> {
@@ -261,19 +260,19 @@ where {
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let if_stmt = self.arena.alloc(Stmt {
-            span: Span {
+        let if_stmt = self.arena.stmt(
+            Span {
                 start: if_pos,
                 end: if_pos,
             },
-            data: IfStmt {
+            IfStmt {
                 if_pos,
                 cond,
                 then_arm: body,
                 else_pos: None,
                 else_arm: &[],
             },
-        });
+        );
         // Collect "elif" statements and connect them later.
         let mut elifs = vec![];
         while self.tok.kind == Token::Elif {
@@ -282,19 +281,19 @@ where {
             let cond = self.parse_test()?;
             self.consume(Token::Colon)?;
             let body = self.parse_suite()?;
-            elifs.push(self.arena.alloc(Stmt {
-                span: Span {
+            elifs.push(self.arena.stmt(
+                Span {
                     start: elif_pos,
                     end: elif_pos,
                 },
-                data: IfStmt {
+                IfStmt {
                     if_pos: elif_pos,
                     cond,
                     then_arm: body,
                     else_pos: None,
                     else_arm: &[],
                 },
-            }));
+            ));
         }
         let mut else_arm = None;
         if self.tok.kind == Token::Else {
@@ -375,19 +374,18 @@ where {
         let x = self.parse_expr(false)?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let for_stmt = self.arena.alloc(Stmt {
-            span: Span {
+        Ok(self.arena.stmt(
+            Span {
                 start: for_pos,
                 end: for_pos,
             },
-            data: ForStmt {
+            ForStmt {
                 for_pos,
                 vars,
                 x,
                 body,
             },
-        });
-        Ok(for_stmt)
+        ))
     }
 
     // Equivalent to 'exprlist' production in Python grammar.
@@ -410,17 +408,17 @@ where {
             list.push(self.parse_primary_with_suffix()?);
         }
         let list = self.arena.alloc_slice_copy(&list.into_boxed_slice());
-        let for_loop_vars = self.arena.alloc(Expr {
-            span: Span {
+        let for_loop_vars = self.arena.expr(
+            Span {
                 start: v.span.start,
                 end: v.span.start, /* todo */
             },
-            data: ExprData::TupleExpr {
+            ExprData::TupleExpr {
                 lparen: None,
                 list,
                 rparen: None,
             },
-        });
+        );
         Ok(&*for_loop_vars)
     }
 
@@ -429,18 +427,17 @@ where {
         let cond = self.parse_test()?;
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
-        let while_stmt = self.arena.alloc(Stmt {
-            span: Span {
+        Ok(self.arena.stmt(
+            Span {
                 start: while_pos,
                 end: while_pos,
             },
-            data: StmtData::WhileStmt {
+            StmtData::WhileStmt {
                 while_pos,
                 cond,
                 body,
             },
-        });
-        Ok(while_stmt)
+        ))
     }
 
     // stmt = LOAD '(' STRING {',' (IDENT '=')? STRING} [','] ')'
@@ -522,20 +519,19 @@ where {
         }
         let to = self.arena.alloc_slice_copy(&to.into_boxed_slice());
         let from = self.arena.alloc_slice_copy(&from.into_boxed_slice());
-        let load_stmt = self.arena.alloc(Stmt {
-            span: Span {
+        Ok(self.arena.stmt(
+            Span {
                 start: load_pos,
                 end: load_pos,
             },
-            data: StmtData::LoadStmt {
+            StmtData::LoadStmt {
                 load_pos,
                 module,
                 to,
                 from,
                 rparen_pos: rparen,
             },
-        });
-        Ok(load_stmt)
+        ))
     }
 
     // simple_stmt = small_stmt (SEMI small_stmt)* SEMI? NEWLINE
@@ -595,17 +591,16 @@ where {
             Token::Break | Token::Continue | Token::Pass => {
                 let tok = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume it
-                let branch_stmt = self.arena.alloc(Stmt {
-                    span: Span {
+                return Ok(self.arena.stmt(
+                    Span {
                         start: pos,
                         end: pos,
                     },
-                    data: StmtData::BranchStmt {
+                    StmtData::BranchStmt {
                         token: tok,
                         token_pos: pos,
                     },
-                });
-                return Ok(branch_stmt);
+                ));
             }
             Token::Load => return self.parse_load_stmt(),
             _ => {}
@@ -629,32 +624,30 @@ where {
                 let op = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume op
                 let rhs = self.parse_expr(false)?;
-                let assign_stmt = self.arena.alloc(Stmt {
-                    span: Span {
+                return Ok(self.arena.stmt(
+                    Span {
                         start: pos,
                         end: pos,
                     },
-                    data: StmtData::AssignStmt {
+                    StmtData::AssignStmt {
                         op_pos: pos,
                         op,
                         lhs: x,
                         rhs,
                     },
-                });
-                return Ok(assign_stmt);
+                ));
             }
             _ => {}
         }
 
         // Expression statement (e.g. function call, doc string).
-        let expr_stmt = self.arena.alloc(Stmt {
-            span: Span {
+        Ok(self.arena.stmt(
+            Span {
                 start: pos,
                 end: pos,
             },
-            data: StmtData::ExprStmt { x },
-        });
-        Ok(expr_stmt)
+            StmtData::ExprStmt { x },
+        ))
     }
 
     // parse_test parses a 'test', a single-component expression.
@@ -755,10 +748,10 @@ where {
                     } else {
                         (None, op_pos)
                     };
-                let unary_expr = self.arena.alloc(Expr {
-                    span: Span { start: op_pos, end },
-                    data: ExprData::UnaryExpr { op_pos, op, x },
-                });
+                let unary_expr = self.arena.expr(
+                    Span { start: op_pos, end },
+                    ExprData::UnaryExpr { op_pos, op, x },
+                );
                 params.push(&*unary_expr);
                 continue;
             }
@@ -771,18 +764,18 @@ where {
                 // default value
                 let eq = self.next_token()?;
                 let dflt = self.parse_test()?;
-                let binary_expr = self.arena.alloc(Expr {
-                    span: Span {
+                let binary_expr = self.arena.expr(
+                    Span {
                         start: id.span.start,
                         end: dflt.span.end,
                     },
-                    data: ExprData::BinaryExpr {
+                    ExprData::BinaryExpr {
                         x: id,
                         op_pos: eq,
                         op: Token::Eq,
                         y: dflt,
                     },
-                });
+                );
                 params.push(binary_expr);
                 continue;
             }
@@ -808,17 +801,17 @@ where {
         let mut exprs = vec![x];
         self.parse_exprs(&mut exprs, in_parens)?;
         let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
-        let tuple_expr = self.arena.alloc(Expr {
-            span: Span {
+        let tuple_expr = self.arena.expr(
+            Span {
                 start: x.span.start,
                 end: self.pos,
             },
-            data: ExprData::TupleExpr {
+            ExprData::TupleExpr {
                 lparen: None,
                 list,
                 rparen: None,
             },
-        });
+        );
         Ok(tuple_expr)
     }
 
@@ -833,13 +826,13 @@ where {
         match self.tok.kind {
             Token::Ident { .. } => {
                 let ident = self.parse_ident()?;
-                let ident_expr = self.arena.alloc(Expr {
-                    span: Span {
+                let ident_expr = self.arena.expr(
+                    Span {
                         start: ident.name_pos,
                         end: ident.name_pos,
                     },
-                    data: ExprData::Ident(ident),
-                });
+                    ExprData::Ident(ident),
+                );
                 Ok(ident_expr)
             }
 
@@ -851,17 +844,16 @@ where {
                 let literal_token = self.sc.literal_from_token(token);
                 let token_pos = self.pos;
                 let pos = self.next_token()?;
-                let literal = self.arena.alloc(Expr {
-                    span: Span {
+                Ok(self.arena.expr(
+                    Span {
                         start: pos,
                         end: pos,
                     },
-                    data: ExprData::Literal {
+                    ExprData::Literal {
                         token: literal_token,
                         token_pos,
                     },
-                });
-                Ok(literal)
+                ))
             }
             Token::LBrack => self.parse_list(),
 
@@ -872,51 +864,48 @@ where {
                 if self.tok.kind == Token::RParen {
                     // empty tuple
                     let rparen = self.next_token()?;
-                    let tuple_expr = self.arena.alloc(Expr {
-                        span: Span {
+                    return Ok(self.arena.expr(
+                        Span {
                             start: lparen,
                             end: rparen,
                         },
-                        data: ExprData::TupleExpr {
+                        ExprData::TupleExpr {
                             lparen: Some(lparen),
                             list: &[],
                             rparen: Some(rparen),
                         },
-                    });
-                    return Ok(tuple_expr);
+                    ));
                 }
                 let e = self.parse_expr(true)?; // allow trailing comma
                 let rparen = self.consume(Token::RParen)?;
-                let paren_expr = self.arena.alloc(Expr {
-                    span: Span {
+                Ok(self.arena.expr(
+                    Span {
                         start: lparen,
                         end: rparen,
                     },
-                    data: ExprData::ParenExpr {
+                    ExprData::ParenExpr {
                         lparen,
                         x: e,
                         rparen,
                     },
-                });
-                Ok(paren_expr)
+                ))
             }
             Token::Minus | Token::Plus | Token::Tilde => {
                 // unary
                 let tok = self.tok.kind.clone();
                 let pos = self.next_token()?;
                 let x = self.parse_primary_with_suffix()?;
-                let unary_expr = self.arena.alloc(Expr {
-                    span: Span {
+                Ok(self.arena.expr(
+                    Span {
                         start: pos,
                         end: pos,
                     },
-                    data: ExprData::UnaryExpr {
+                    ExprData::UnaryExpr {
                         op_pos: pos,
                         op: tok,
                         x: Some(x),
                     },
-                });
-                Ok(unary_expr)
+                ))
             }
             _ => Err(ParseError::ExpectedPrimaryExpression {
                 path: self.path_string(),
@@ -936,18 +925,17 @@ where {
         if self.tok.kind == Token::RBrack {
             // empty List
             let rbrack = self.next_token()?;
-            let list_expr = self.arena.alloc(Expr {
-                span: Span {
+            return Ok(self.arena.expr(
+                Span {
                     start: lbrack,
                     end: rbrack,
                 },
-                data: ExprData::ListExpr {
+                ExprData::ListExpr {
                     lbrack,
                     list: &[],
                     rbrack,
                 },
-            });
-            return Ok(list_expr);
+            ));
         }
 
         let x = self.parse_test()?;
@@ -965,18 +953,17 @@ where {
 
         let rbrack = self.consume(Token::RBrack)?;
         let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
-        let list_expr = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: lbrack,
                 end: rbrack,
             },
-            data: ExprData::ListExpr {
+            ExprData::ListExpr {
                 lbrack,
                 list,
                 rbrack,
             },
-        });
-        Ok(list_expr)
+        ))
     }
 
     // dict = '{' '}'
@@ -988,18 +975,17 @@ where {
         if self.tok.kind == Token::RBrace {
             // empty dict
             let rbrace = self.next_token()?;
-            let dict_expr = self.arena.alloc(Expr {
-                span: Span {
+            return Ok(self.arena.expr(
+                Span {
                     start: lbrace,
                     end: rbrace,
                 },
-                data: ExprData::DictExpr {
+                ExprData::DictExpr {
                     lbrace,
                     list: &[],
                     rbrace,
                 },
-            });
-            return Ok(dict_expr);
+            ));
         }
 
         let x = self.parse_dict_entry()?;
@@ -1020,18 +1006,17 @@ where {
 
         let rbrace = self.consume(Token::RBrace)?;
         let list = self.arena.alloc_slice_copy(&entries.into_boxed_slice());
-        let dict_expr = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: lbrace,
                 end: rbrace,
             },
-            data: ExprData::DictExpr {
+            ExprData::DictExpr {
                 lbrace,
                 list,
                 rbrace,
             },
-        });
-        Ok(dict_expr)
+        ))
     }
 
     // dict_entry = test ':' test
@@ -1039,18 +1024,17 @@ where {
         let k = self.parse_test()?;
         let colon = self.consume(Token::Colon)?;
         let v = self.parse_test()?;
-        let dict_entry = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: k.span.start,
                 end: v.span.end,
             },
-            data: ExprData::DictEntry {
+            ExprData::DictEntry {
                 key: k,
                 colon,
                 value: v,
             },
-        });
-        Ok(dict_entry)
+        ))
     }
 
     // parseExprs parses a comma-separated list of expressions, starting with the comma.
@@ -1087,19 +1071,18 @@ where {
             args = self.parse_args()?;
             self.consume(Token::RParen)?
         };
-        let call_expr = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: func.span.start,
                 end: rparen,
             },
-            data: ExprData::CallExpr {
+            ExprData::CallExpr {
                 func,
                 lparen,
                 args,
                 rparen,
             },
-        });
-        Ok(call_expr)
+        ))
     }
 
     // parseLambda parses a lambda expression.
@@ -1118,19 +1101,18 @@ where {
             self.parse_test_no_cond()?
         };
 
-        let lambda_expr = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: lambda_pos,
                 end: body.span.end,
             },
-            data: ExprData::LambdaExpr {
+            ExprData::LambdaExpr {
                 lambda_pos,
                 params,
                 body,
                 function: RefCell::new(None),
             },
-        });
-        Ok(lambda_expr)
+        ))
     }
 
     // comp_suffix = FOR loopvars IN expr comp_suffix
@@ -1180,20 +1162,19 @@ where {
         }
         let rbrace = self.next_token()?;
         let clauses = self.arena.alloc_slice_copy(&clauses.into_boxed_slice());
-        let comprehension = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: lbrace,
                 end: rbrace,
             },
-            data: ExprData::Comprehension {
+            ExprData::Comprehension {
                 curly: end_brace == Token::RBrace,
                 lbrack_pos: lbrace,
                 body,
                 clauses,
                 rbrack_pos: rbrace,
             },
-        });
-        Ok(comprehension)
+        ))
     }
 
     // parse_testNoCond parses a a single-component expression without
@@ -1215,18 +1196,17 @@ where {
         if self.tok.kind == Token::Not && prec == Token::Not.precedence().unwrap() {
             let op_pos = self.next_token()?;
             let x = self.parse_test_prec(prec)?;
-            let unary_expr = self.arena.alloc(Expr {
-                span: Span {
+            return Ok(self.arena.expr(
+                Span {
                     start: op_pos,
                     end: x.span.end,
                 },
-                data: ExprData::UnaryExpr {
+                ExprData::UnaryExpr {
                     op_pos,
                     op: Token::Not,
                     x: Some(x),
                 },
-            });
-            return Ok(unary_expr);
+            ));
         }
 
         self.parse_binop_expr(prec)
@@ -1250,17 +1230,17 @@ where {
                 let op = self.tok.kind.clone();
                 let op_pos = self.next_token()?;
                 let x = self.parse_test()?;
-                let unary_expr = self.arena.alloc(Expr {
-                    span: Span {
+                let unary_expr = self.arena.expr(
+                    Span {
                         start: op_pos,
                         end: x.span.end,
                     },
-                    data: ExprData::UnaryExpr {
+                    ExprData::UnaryExpr {
                         op_pos,
                         op,
                         x: Some(x),
                     },
-                });
+                );
                 args.push(&*unary_expr);
                 continue;
             }
@@ -1280,18 +1260,18 @@ where {
                 }
                 let op_pos = self.next_token()?;
                 let y = self.parse_test()?;
-                x = self.arena.alloc(Expr {
-                    span: Span {
+                x = self.arena.expr(
+                    Span {
                         start: x.span.start,
                         end: y.span.end,
                     },
-                    data: ExprData::BinaryExpr {
+                    ExprData::BinaryExpr {
                         x,
                         op_pos,
                         op: Token::Eq,
                         y,
                     },
-                });
+                );
             }
 
             args.push(x);
@@ -1364,13 +1344,13 @@ where {
             let op = self.tok.kind.clone();
             let op_pos = self.next_token()?;
             let y = self.parse_test_prec(op_prec + 1)?;
-            let binary_expr = self.arena.alloc(Expr {
-                span: Span {
+            let binary_expr = self.arena.expr(
+                Span {
                     start: x.span.start,
                     end: y.span.end,
                 },
-                data: ExprData::BinaryExpr { op_pos, op, x, y },
-            });
+                ExprData::BinaryExpr { op_pos, op, x, y },
+            );
             x = &*binary_expr;
             first = false;
         }
@@ -1389,18 +1369,18 @@ where {
                     let dot = self.next_token()?;
                     let id = self.parse_ident()?;
                     let name_pos = self.pos;
-                    let dot_expr = self.arena.alloc(Expr {
-                        span: Span {
+                    let dot_expr = self.arena.expr(
+                        Span {
                             start: x.span.start,
                             end: name_pos,
                         },
-                        data: ExprData::DotExpr {
+                        ExprData::DotExpr {
                             dot,
                             x,
                             name: id,
                             name_pos,
                         },
-                    });
+                    );
                     x = &*dot_expr;
                 }
                 Token::LBrack => x = self.parse_slice_suffix(x)?,
@@ -1420,19 +1400,18 @@ where {
             // index x[y]
             if self.tok.kind == Token::RBrack {
                 let rbrack = self.next_token()?;
-                let index_expr = self.arena.alloc(Expr {
-                    span: Span {
+                return Ok(self.arena.expr(
+                    Span {
                         start: x.span.start,
                         end: rbrack,
                     },
-                    data: ExprData::IndexExpr {
+                    ExprData::IndexExpr {
                         x,
                         lbrack,
                         y,
                         rbrack,
                     },
-                });
-                return Ok(index_expr);
+                ));
             }
 
             lo = Some(y)
@@ -1453,12 +1432,12 @@ where {
             }
         }
         let rbrack = self.consume(Token::RBrack)?;
-        let slice_expr = self.arena.alloc(Expr {
-            span: Span {
+        Ok(self.arena.expr(
+            Span {
                 start: lbrack,
                 end: rbrack,
             },
-            data: ExprData::SliceExpr {
+            ExprData::SliceExpr {
                 x,
                 lbrack,
                 lo,
@@ -1466,8 +1445,7 @@ where {
                 step,
                 rbrack,
             },
-        });
-        Ok(slice_expr)
+        ))
     }
 }
 

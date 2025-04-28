@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{Expr, ExprData, Span, Stmt, StmtData};
 use bumpalo::Bump;
 
 #[derive(Default)]
@@ -34,5 +35,23 @@ impl Arena {
 
     pub fn alloc_str(&self, src: &str) -> &mut str {
         self.bump.alloc_str(src)
+    }
+
+    /// Allocates an [`Expr`] in this [`Arena`].
+    pub fn expr<'arena>(
+        &'arena self,
+        span: Span,
+        data: ExprData<'arena>,
+    ) -> &'arena mut Expr<'arena> {
+        self.bump.alloc(Expr { span, data })
+    }
+
+    /// Allocates a [`Stmt`] in this [`Arena`].
+    pub fn stmt<'arena>(
+        &'arena self,
+        span: Span,
+        data: StmtData<'arena>,
+    ) -> &'arena mut Stmt<'arena> {
+        self.bump.alloc(Stmt { span, data })
     }
 }
