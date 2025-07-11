@@ -25,7 +25,7 @@ use crate::binding::{Binding, BindingIndex, Function, Module, Scope};
 use crate::scan::Position;
 use crate::syntax::*;
 use crate::token::Token;
-use crate::Arena;
+use crate::{Arena, ID_GEN};
 use thiserror::Error;
 
 type Result<T> = std::result::Result<T, ResolveError>;
@@ -1222,6 +1222,7 @@ impl<'arena> Resolver<'arena> {
                     pos: e.span.start,
                     params,
                     body: self.arena.alloc_slice_copy(&[&*self.arena.alloc(Stmt {
+                        id: ID_GEN.next_stmt_id(),
                         span: e.span,
                         data: StmtData::ReturnStmt {
                             result: Some(body),

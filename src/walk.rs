@@ -240,7 +240,7 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
 #[cfg(test)]
 mod test {
 
-    use crate::Arena;
+    use crate::{Arena, ID_GEN};
     use anyhow::Result;
     use std::path::Path;
 
@@ -267,20 +267,24 @@ mod test {
         };
         let foobar_ident = Ident::new(fake_pos, "foobar");
         let foobar = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::Ident(&foobar_ident),
         };
         let x_ident = Ident::new(fake_pos, "x");
         let x = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::Ident(&x_ident),
         };
         let y_ident = Ident::new(fake_pos, "y");
         let y = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::Ident(&y_ident),
         };
         let three = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::Literal {
                 token_pos: fake_pos,
@@ -288,6 +292,7 @@ mod test {
             },
         };
         let y_expr = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::BinaryExpr {
                 x: &y,
@@ -297,6 +302,7 @@ mod test {
             },
         };
         let foobar_expr = Expr {
+            id: ID_GEN.next_expr_id(),
             span: span,
             data: ExprData::CallExpr {
                 func: &foobar,
@@ -306,6 +312,7 @@ mod test {
             },
         };
         let foobar_stmt = Stmt {
+            id: ID_GEN.next_stmt_id(),
             span: span,
             data: StmtData::ExprStmt { x: &foobar_expr },
         };

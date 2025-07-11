@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::ID_GEN;
 use std::{cell::RefCell, fmt::Display, path::Path};
 
 use num_bigint::BigInt;
@@ -46,8 +47,12 @@ pub struct Comments<'a> {
 }
 
 #[derive(Debug)]
+pub struct StmtId(pub usize);
+
+#[derive(Debug)]
 pub struct Stmt<'a> {
     pub span: Span,
+    pub id: StmtId,
     pub data: StmtData<'a>,
 }
 
@@ -312,8 +317,12 @@ impl Display for StmtData<'_> {
 }
 
 #[derive(Debug)]
+pub struct ExprId(pub usize);
+
+#[derive(Debug)]
 pub struct Expr<'a> {
     pub span: Span,
+    pub id: ExprId,
     pub data: ExprData<'a>,
 }
 
@@ -730,6 +739,7 @@ impl<'a> Ident<'a> {
 
     pub fn as_expr(&'a self) -> Expr<'a> {
         Expr {
+            id: ID_GEN.next_expr_id(),
             span: Span {
                 start: self.name_pos,
                 end: self.name_pos,

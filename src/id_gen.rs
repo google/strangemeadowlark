@@ -1,4 +1,4 @@
-// Copyright 2023 Google LLC
+// Copyright 2025 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,31 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)]
-#![allow(dead_code)]
+use crate::{ExprId, StmtId};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-mod arena;
-pub mod binding;
-mod id_gen;
-mod mir;
-mod parse;
-mod print;
-mod quote;
-mod resolve;
-mod scan;
-mod syntax;
-mod token;
-mod value;
-mod walk;
+pub static ID_GEN: IdGen = IdGen {
+    id: AtomicUsize::new(1),
+};
 
-use id_gen::ID_GEN;
+pub struct IdGen {
+    id: AtomicUsize,
+}
 
-pub use arena::Arena;
-pub use mir::{Lowered, MirBuilder};
-pub use parse::{parse, parse_expr, parse_with_mode, Mode, ParseError};
-pub use print::Printer;
-pub use resolve::resolve_file;
-pub use syntax::*;
-pub use token::*;
-pub use value::{StarlarkType, Value};
-pub use walk::{Node, NodeIterator};
+impl IdGen {
+    pub fn next_expr_id(&self) -> ExprId {
+        ExprId(self.id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn next_stmt_id(&self) -> StmtId {
+        StmtId(self.id.fetch_add(1, Ordering::Relaxed))
+    }
+}

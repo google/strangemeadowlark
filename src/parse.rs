@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::scan::*;
 use crate::syntax::{StmtData::*, *};
 use crate::token::*;
-use crate::Arena;
+use crate::{Arena, ID_GEN};
 use thiserror::Error;
 
 // This file defines a recursive-descent parser for Starlark.
@@ -142,6 +143,9 @@ struct Parser<'arena> {
     pos: Position,
     arena: &'arena Arena,
     path: &'arena Path,
+    comments_before: HashMap<usize, usize>,
+    comments_suffix: HashMap<usize, usize>,
+    comments_after: HashMap<usize, usize>,
 }
 
 impl<'arena> Parser<'arena> {
@@ -162,7 +166,18 @@ impl<'arena> Parser<'arena> {
             pos,
             arena,
             path: path.as_ref(),
+            comments_before: HashMap::new(),
+            comments_suffix: HashMap::new(),
+            comments_after: HashMap::new(),
         })
+    }
+
+    fn next_expr_id(&self) -> ExprId {
+        ID_GEN.next_expr_id()
+    }
+
+    fn next_stmt_id(&self) -> StmtId {
+        ID_GEN.next_stmt_id()
     }
 
     fn path_string(&self) -> String {
@@ -238,6 +253,7 @@ where {
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let stmt: &'arena mut Stmt<'arena> = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: def_pos,
                 end: def_pos,
@@ -262,6 +278,7 @@ where {
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let if_stmt = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: if_pos,
                 end: if_pos,
@@ -283,6 +300,7 @@ where {
             self.consume(Token::Colon)?;
             let body = self.parse_suite()?;
             elifs.push(self.arena.alloc(Stmt {
+                id: self.next_stmt_id(),
                 span: Span {
                     start: elif_pos,
                     end: elif_pos,
@@ -376,6 +394,7 @@ where {
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let for_stmt = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: for_pos,
                 end: for_pos,
@@ -411,6 +430,7 @@ where {
         }
         let list = self.arena.alloc_slice_copy(&list.into_boxed_slice());
         let for_loop_vars = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: v.span.start,
                 end: v.span.start, /* todo */
@@ -430,6 +450,7 @@ where {
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let while_stmt = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: while_pos,
                 end: while_pos,
@@ -523,6 +544,7 @@ where {
         let to = self.arena.alloc_slice_copy(&to.into_boxed_slice());
         let from = self.arena.alloc_slice_copy(&from.into_boxed_slice());
         let load_stmt = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: load_pos,
                 end: load_pos,
@@ -581,6 +603,7 @@ where {
                     result = Some(self.parse_expr(false)?);
                 }
                 let return_stmt = self.arena.alloc(Stmt {
+                    id: self.next_stmt_id(),
                     span: Span {
                         start: pos,
                         end: pos,
@@ -596,6 +619,7 @@ where {
                 let tok = self.tok.kind.clone();
                 let pos = self.next_token()?; // consume it
                 let branch_stmt = self.arena.alloc(Stmt {
+                    id: ID_GEN.next_stmt_id(),
                     span: Span {
                         start: pos,
                         end: pos,
@@ -630,6 +654,7 @@ where {
                 let pos = self.next_token()?; // consume op
                 let rhs = self.parse_expr(false)?;
                 let assign_stmt = self.arena.alloc(Stmt {
+                    id: self.next_stmt_id(),
                     span: Span {
                         start: pos,
                         end: pos,
@@ -648,6 +673,7 @@ where {
 
         // Expression statement (e.g. function call, doc string).
         let expr_stmt = self.arena.alloc(Stmt {
+            id: self.next_stmt_id(),
             span: Span {
                 start: pos,
                 end: pos,
@@ -678,6 +704,7 @@ where {
             let else_pos = self.next_token()?;
             let else_ = self.parse_test()?;
             return Ok(self.arena.alloc(Expr {
+                id: self.next_expr_id(),
                 span: Span {
                     start: if_pos,
                     end: if_pos,
@@ -756,6 +783,7 @@ where {
                         (None, op_pos)
                     };
                 let unary_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span { start: op_pos, end },
                     data: ExprData::UnaryExpr { op_pos, op, x },
                 });
@@ -772,6 +800,7 @@ where {
                 let eq = self.next_token()?;
                 let dflt = self.parse_test()?;
                 let binary_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: id.span.start,
                         end: dflt.span.end,
@@ -809,6 +838,7 @@ where {
         self.parse_exprs(&mut exprs, in_parens)?;
         let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
         let tuple_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: x.span.start,
                 end: self.pos,
@@ -834,6 +864,7 @@ where {
             Token::Ident { .. } => {
                 let ident = self.parse_ident()?;
                 let ident_expr = self.arena.alloc(Expr {
+                    id: ID_GEN.next_expr_id(),
                     span: Span {
                         start: ident.name_pos,
                         end: ident.name_pos,
@@ -852,6 +883,7 @@ where {
                 let token_pos = self.pos;
                 let pos = self.next_token()?;
                 let literal = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: pos,
                         end: pos,
@@ -873,6 +905,7 @@ where {
                     // empty tuple
                     let rparen = self.next_token()?;
                     let tuple_expr = self.arena.alloc(Expr {
+                        id: self.next_expr_id(),
                         span: Span {
                             start: lparen,
                             end: rparen,
@@ -888,6 +921,7 @@ where {
                 let e = self.parse_expr(true)?; // allow trailing comma
                 let rparen = self.consume(Token::RParen)?;
                 let paren_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: lparen,
                         end: rparen,
@@ -906,6 +940,7 @@ where {
                 let pos = self.next_token()?;
                 let x = self.parse_primary_with_suffix()?;
                 let unary_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: pos,
                         end: pos,
@@ -937,6 +972,7 @@ where {
             // empty List
             let rbrack = self.next_token()?;
             let list_expr = self.arena.alloc(Expr {
+                id: self.next_expr_id(),
                 span: Span {
                     start: lbrack,
                     end: rbrack,
@@ -966,6 +1002,7 @@ where {
         let rbrack = self.consume(Token::RBrack)?;
         let list = self.arena.alloc_slice_copy(&exprs.into_boxed_slice());
         let list_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: lbrack,
                 end: rbrack,
@@ -989,6 +1026,7 @@ where {
             // empty dict
             let rbrace = self.next_token()?;
             let dict_expr = self.arena.alloc(Expr {
+                id: self.next_expr_id(),
                 span: Span {
                     start: lbrace,
                     end: rbrace,
@@ -1021,6 +1059,7 @@ where {
         let rbrace = self.consume(Token::RBrace)?;
         let list = self.arena.alloc_slice_copy(&entries.into_boxed_slice());
         let dict_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: lbrace,
                 end: rbrace,
@@ -1040,6 +1079,7 @@ where {
         let colon = self.consume(Token::Colon)?;
         let v = self.parse_test()?;
         let dict_entry = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: k.span.start,
                 end: v.span.end,
@@ -1088,6 +1128,7 @@ where {
             self.consume(Token::RParen)?
         };
         let call_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: func.span.start,
                 end: rparen,
@@ -1119,6 +1160,7 @@ where {
         };
 
         let lambda_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: lambda_pos,
                 end: body.span.end,
@@ -1181,6 +1223,7 @@ where {
         let rbrace = self.next_token()?;
         let clauses = self.arena.alloc_slice_copy(&clauses.into_boxed_slice());
         let comprehension = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: lbrace,
                 end: rbrace,
@@ -1216,6 +1259,7 @@ where {
             let op_pos = self.next_token()?;
             let x = self.parse_test_prec(prec)?;
             let unary_expr = self.arena.alloc(Expr {
+                id: self.next_expr_id(),
                 span: Span {
                     start: op_pos,
                     end: x.span.end,
@@ -1251,6 +1295,7 @@ where {
                 let op_pos = self.next_token()?;
                 let x = self.parse_test()?;
                 let unary_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: op_pos,
                         end: x.span.end,
@@ -1281,6 +1326,7 @@ where {
                 let op_pos = self.next_token()?;
                 let y = self.parse_test()?;
                 x = self.arena.alloc(Expr {
+                    id: ID_GEN.next_expr_id(),
                     span: Span {
                         start: x.span.start,
                         end: y.span.end,
@@ -1365,6 +1411,7 @@ where {
             let op_pos = self.next_token()?;
             let y = self.parse_test_prec(op_prec + 1)?;
             let binary_expr = self.arena.alloc(Expr {
+                id: self.next_expr_id(),
                 span: Span {
                     start: x.span.start,
                     end: y.span.end,
@@ -1390,6 +1437,7 @@ where {
                     let id = self.parse_ident()?;
                     let name_pos = self.pos;
                     let dot_expr = self.arena.alloc(Expr {
+                        id: self.next_expr_id(),
                         span: Span {
                             start: x.span.start,
                             end: name_pos,
@@ -1421,6 +1469,7 @@ where {
             if self.tok.kind == Token::RBrack {
                 let rbrack = self.next_token()?;
                 let index_expr = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
                     span: Span {
                         start: x.span.start,
                         end: rbrack,
@@ -1454,6 +1503,7 @@ where {
         }
         let rbrack = self.consume(Token::RBrack)?;
         let slice_expr = self.arena.alloc(Expr {
+            id: self.next_expr_id(),
             span: Span {
                 start: lbrack,
                 end: rbrack,
