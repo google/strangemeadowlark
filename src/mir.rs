@@ -770,16 +770,6 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 let func_index = f.borrow().unwrap();
                 let func = &self.module.functions[func_index];
 
-                // Get the functions locals that require cells
-
-                let mut cells = vec![];
-                for bindx in func.locals.borrow().iter() {
-                    let bind = self.module.binding(bindx);
-                    if bind.get_scope() == Scope::Cell {
-                        cells.push(bindx)
-                    }
-                }
-
                 let mut clos = vec![];
                 let tmp = self.create_tmp();
                 self.push_instr(Instruction::Assign(
@@ -805,7 +795,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                                 Rvalue::Use(Operand::Copy(place)),
                             ));
                         }
-                        _ => todo!(),
+                        x => unreachable!("This cannot happen: {x:?}"),
                     };
 
                     clos.push(tmp)
