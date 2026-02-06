@@ -1043,7 +1043,7 @@ where
                         return Ok(());
                     }
                     _ => {
-                        let bigint_value = num_bigint::BigInt::parse_bytes(s[2..].as_bytes(), 16)
+                        let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes()[2..], 16)
                             .ok_or(ScanError::CouldNotParseHexBigInt {
                             path: self.path_string(),
                             pos: start,
@@ -1238,7 +1238,7 @@ pass",
                     Err(msg) => fail!("{} {}", msg, input)?,
                 }
             }
-            assert_eq!(tokens, want, "{}", input);
+            assert_eq!(tokens, want, "{input}");
         }
         Ok(())
     }

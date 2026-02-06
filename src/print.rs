@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::{
-    quote::{quote, quote_bytes},
     Clause, Expr, ExprData, FileUnit, Literal, Span, Stmt, StmtData,
+    quote::{quote, quote_bytes},
 };
 use anyhow::Result;
 use std::fmt;
@@ -92,7 +92,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 
     fn write(&mut self, text: &str) -> Result<()> {
         self.current_col += text.len();
-        write!(self.writer, "{}", text)?;
+        write!(self.writer, "{text}")?;
         Ok(())
     }
 
@@ -106,15 +106,15 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.print_indent()?;
                 self.current_col += text.len();
             } else {
-                write!(self.writer, "{}", prefix)?;
+                write!(self.writer, "{prefix}")?;
             }
         }
-        write!(self.writer, "{}", text)?;
+        write!(self.writer, "{text}")?;
         Ok(())
     }
 
     fn writeln(&mut self, text: &str) -> Result<()> {
-        writeln!(self.writer, "{}", text)?;
+        writeln!(self.writer, "{text}")?;
         self.current_col = 1;
         Ok(())
     }
@@ -391,7 +391,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
             ExprData::BinaryExpr { x, op, y, .. } => {
                 self.print_expr(x)?;
                 self.write(" ")?;
-                self.write(&format!("{}", op))?;
+                self.write(&format!("{op}"))?;
                 self.write(" ")?;
                 self.print_expr(y)?;
             }
@@ -477,15 +477,15 @@ impl<'ast, 'w> Printer<'ast, 'w> {
             ExprData::Literal {
                 token: Literal::Int(int_value),
                 ..
-            } => self.write(&format!("{}", int_value))?,
+            } => self.write(&format!("{int_value}"))?,
             ExprData::Literal {
                 token: Literal::BigInt(bigint_value),
                 ..
-            } => self.write(&format!("{}", bigint_value))?,
+            } => self.write(&format!("{bigint_value}"))?,
             ExprData::Literal {
                 token: Literal::Float(float_value),
                 ..
-            } => self.write(&format!("{}", float_value))?,
+            } => self.write(&format!("{float_value}"))?,
             ExprData::ParenExpr { x, .. } => {
                 self.write("(")?;
                 self.print_expr(x)?;
@@ -515,7 +515,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.write(")")?;
             }
             ExprData::UnaryExpr { op, x, .. } => {
-                self.write(&format!("{}", op))?;
+                self.write(&format!("{op}"))?;
                 if let Some(x) = x {
                     self.print_expr(x)?;
                 }
@@ -528,7 +528,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{parse_with_mode, Arena, Mode};
+    use crate::{Arena, Mode, parse_with_mode};
     use googletest::prelude::*;
 
     #[test]
@@ -549,10 +549,10 @@ for x in foo():
 
 ";
         let arena = Arena::new();
-        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
+        let unit = parse_with_mode(&arena, &"<test>", src, Mode::RetainComments)?;
 
         let mut w = String::new();
-        let mut printer = Printer::new(unit, &mut w);
+        let mut printer = Printer::new(&unit, &mut w);
 
         assert!(printer.print_file_unit().is_ok());
 
@@ -569,10 +569,10 @@ foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, 
  
 ";
         let arena = Arena::new();
-        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
+        let unit = parse_with_mode(&arena, &"<test>", src, Mode::RetainComments)?;
 
         let mut w = String::new();
-        let mut printer = Printer::new(unit, &mut w);
+        let mut printer = Printer::new(&unit, &mut w);
 
         assert!(printer.print_file_unit().is_ok());
 
@@ -598,12 +598,14 @@ foo(same, here, we, have, a, callexpr, that, has, many, parameters, it, should, 
  
 ";
         let arena = Arena::new();
-        let unit = parse_with_mode(&arena, &"<test>", &src, Mode::RetainComments)?;
+        let unit = parse_with_mode(&arena, &"<test>", src, Mode::RetainComments)?;
 
         let mut w = String::new();
-        let mut options = PrinterOptions::default();
-        options.split_module_fn_args = true;
-        let mut printer = Printer::new_with_options(unit, &mut w, options);
+        let options = PrinterOptions {
+            split_module_fn_args: true,
+            ..Default::default()
+        };
+        let mut printer = Printer::new_with_options(&unit, &mut w, options);
 
         assert!(printer.print_file_unit().is_ok());
 

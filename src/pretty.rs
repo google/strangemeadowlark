@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{
-    scan::Position, Clause, Expr, ExprData, FileUnit, Literal, Stmt, StmtData,
-};
+use crate::{Clause, Expr, ExprData, FileUnit, Literal, Stmt, StmtData, scan::Position};
 use pretty::RcDoc;
 
 const INDENT: isize = 4;
@@ -55,7 +53,9 @@ impl<'a> PrinterState<'a> {
             if c.start.line == pos.line {
                 self.last_suffix_comment += 1;
                 // Buildifier uses two spaces before suffix comment if it's on the same line as code.
-                return RcDoc::space().append(RcDoc::space()).append(RcDoc::text(c.text));
+                return RcDoc::space()
+                    .append(RcDoc::space())
+                    .append(RcDoc::text(c.text));
             } else if c.start.is_before(&pos) {
                 self.last_suffix_comment += 1;
             } else {
@@ -96,30 +96,31 @@ fn pretty_file<'a>(file: &'a FileUnit<'a>, state: &mut PrinterState<'a>) -> RcDo
     });
 
     let mut docs = Vec::new();
-    
+
     for l in loads {
         docs.push(pretty_stmt(l, state));
     }
-    
+
     if !docs.is_empty() && !others.is_empty() {
         docs.push(RcDoc::nil());
     }
 
     for (i, &stmt) in others.iter().enumerate() {
-        if i > 0 {
-            if matches!(stmt.data, StmtData::DefStmt { .. }) {
+        if i > 0
+            && matches!(stmt.data, StmtData::DefStmt { .. }) {
                 docs.push(RcDoc::nil());
             }
-        }
         docs.push(pretty_stmt(stmt, state));
     }
-    
+
     // Print remaining line comments.
     if state.last_line_comment < state.file.line_comments.len() && !docs.is_empty() {
         docs.push(RcDoc::nil());
     }
     while state.last_line_comment < state.file.line_comments.len() {
-        docs.push(RcDoc::text(state.file.line_comments[state.last_line_comment].text));
+        docs.push(RcDoc::text(
+            state.file.line_comments[state.last_line_comment].text,
+        ));
         state.last_line_comment += 1;
     }
 
@@ -127,17 +128,20 @@ fn pretty_file<'a>(file: &'a FileUnit<'a>, state: &mut PrinterState<'a>) -> RcDo
 }
 
 fn get_load_module<'a>(stmt: &'a Stmt<'a>) -> &'a str {
-    if let StmtData::LoadStmt { module, .. } = &stmt.data {
-        if let ExprData::Literal { token: Literal::String(s), .. } = &module.data {
+    if let StmtData::LoadStmt { module, .. } = &stmt.data
+        && let ExprData::Literal {
+            token: Literal::String(s),
+            ..
+        } = &module.data
+        {
             return s;
         }
-    }
     ""
 }
 
 fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a, ()> {
     let mut doc = state.comments_before(stmt.span.start);
-    
+
     let content = match &stmt.data {
         StmtData::AssignStmt { op, lhs, rhs, .. } => pretty_expr(lhs, state)
             .append(RcDoc::space())
@@ -152,22 +156,24 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
                 .append(RcDoc::text(name.name))
                 .append(RcDoc::text("("));
             if !params.is_empty() {
-                d = d.append(
-                    RcDoc::line_()
-                        .append(RcDoc::intersperse(
-                            params.iter().map(|p| pretty_expr(p, state)),
-                            RcDoc::text(",").append(RcDoc::line()),
-                        ))
-                        .nest(INDENT)
-                        .append(RcDoc::line_()),
-                ).group();
+                d = d
+                    .append(
+                        RcDoc::line_()
+                            .append(RcDoc::intersperse(
+                                params.iter().map(|p| pretty_expr(p, state)),
+                                RcDoc::text(",").append(RcDoc::line()),
+                            ))
+                            .nest(INDENT)
+                            .append(RcDoc::line_()),
+                    )
+                    .group();
             }
             d = d.append(RcDoc::text("):"));
             let body_docs = body.iter().map(|s| pretty_stmt(s, state));
             d.append(
                 RcDoc::hardline()
                     .append(RcDoc::intersperse(body_docs, RcDoc::hardline()))
-                    .nest(INDENT)
+                    .nest(INDENT),
             )
         }
         StmtData::ExprStmt { x } => pretty_expr(x, state),
@@ -181,7 +187,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
             d.append(
                 RcDoc::hardline()
                     .append(RcDoc::intersperse(body_docs, RcDoc::hardline()))
-                    .nest(INDENT)
+                    .nest(INDENT),
             )
         }
         StmtData::WhileStmt { cond, body, .. } => {
@@ -192,7 +198,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
             d.append(
                 RcDoc::hardline()
                     .append(RcDoc::intersperse(body_docs, RcDoc::hardline()))
-                    .nest(INDENT)
+                    .nest(INDENT),
             )
         }
         StmtData::IfStmt {
@@ -208,7 +214,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
             d = d.append(
                 RcDoc::hardline()
                     .append(RcDoc::intersperse(then_docs, RcDoc::hardline()))
-                    .nest(INDENT)
+                    .nest(INDENT),
             );
             if !else_arm.is_empty() {
                 d = d.append(RcDoc::hardline()).append(RcDoc::text("else:"));
@@ -216,7 +222,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
                 d = d.append(
                     RcDoc::hardline()
                         .append(RcDoc::intersperse(else_docs, RcDoc::hardline()))
-                        .nest(INDENT)
+                        .nest(INDENT),
                 );
             }
             d
@@ -226,7 +232,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
         } => {
             let mut items: Vec<_> = from.iter().zip(to.iter()).collect();
             items.sort_by(|a, b| a.0.name.cmp(b.0.name));
-            
+
             let mut d = RcDoc::text("load(").append(pretty_expr(module, state));
             for (f, t) in items {
                 d = d.append(RcDoc::text(", "));
@@ -246,7 +252,7 @@ fn pretty_stmt<'a>(stmt: &'a Stmt<'a>, state: &mut PrinterState<'a>) -> RcDoc<'a
             d
         }
     };
-    
+
     doc = doc.append(content);
     doc.append(state.suffix_comment(stmt.span.start))
 }
@@ -323,7 +329,8 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
             clauses,
             ..
         } => {
-            let mut doc = RcDoc::text(if *curly { "{" } else { "[" }).append(pretty_expr(body, state));
+            let mut doc =
+                RcDoc::text(if *curly { "{" } else { "[" }).append(pretty_expr(body, state));
             for clause in *clauses {
                 doc = doc.append(pretty_clause(clause, state));
             }
@@ -339,9 +346,9 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
             .append(pretty_expr(cond, state))
             .append(RcDoc::text(" else "))
             .append(pretty_expr(else_arm, state)),
-        ExprData::DictEntry { key, value, .. } => {
-            pretty_expr(key, state).append(RcDoc::text(": ")).append(pretty_expr(value, state))
-        }
+        ExprData::DictEntry { key, value, .. } => pretty_expr(key, state)
+            .append(RcDoc::text(": "))
+            .append(pretty_expr(value, state)),
         ExprData::DictExpr { list, .. } => {
             let mut doc = RcDoc::text("{");
             if !list.is_empty() {
@@ -359,7 +366,9 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
             }
             doc.append(RcDoc::text("}"))
         }
-        ExprData::DotExpr { x, name, .. } => pretty_expr(x, state).append(RcDoc::text(".")).append(RcDoc::text(name.name)),
+        ExprData::DotExpr { x, name, .. } => pretty_expr(x, state)
+            .append(RcDoc::text("."))
+            .append(RcDoc::text(name.name)),
         ExprData::Ident(ident) => RcDoc::text(ident.name),
         ExprData::IndexExpr { x, y, .. } => pretty_expr(x, state)
             .append(RcDoc::text("["))
@@ -373,7 +382,8 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
                     RcDoc::text(", "),
                 ));
             }
-            doc.append(RcDoc::text(": ")).append(pretty_expr(body, state))
+            doc.append(RcDoc::text(": "))
+                .append(pretty_expr(body, state))
         }
         ExprData::ListExpr { list, .. } => {
             let mut doc = RcDoc::text("[");
@@ -393,7 +403,9 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
             doc.append(RcDoc::text("]"))
         }
         ExprData::Literal { token, .. } => RcDoc::as_string(token),
-        ExprData::ParenExpr { x, .. } => RcDoc::text("(").append(pretty_expr(x, state)).append(RcDoc::text(")")),
+        ExprData::ParenExpr { x, .. } => RcDoc::text("(")
+            .append(pretty_expr(x, state))
+            .append(RcDoc::text(")")),
         ExprData::SliceExpr {
             x, lo, hi, step, ..
         } => {
@@ -406,11 +418,15 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
                 doc = doc.append(pretty_expr(hi, state));
             }
             if let Some(step) = step {
-                doc = doc.append(RcDoc::text(":")).append(pretty_expr(step, state));
+                doc = doc
+                    .append(RcDoc::text(":"))
+                    .append(pretty_expr(step, state));
             }
             doc.append(RcDoc::text("]"))
         }
-        ExprData::TupleExpr { .. } => unreachable!("TupleExpr handled by pretty_expr / pretty_expr_no_parens"),
+        ExprData::TupleExpr { .. } => {
+            unreachable!("TupleExpr handled by pretty_expr / pretty_expr_no_parens")
+        }
         ExprData::UnaryExpr { op, x, .. } => {
             let mut doc = RcDoc::as_string(op);
             if let Some(x) = x {

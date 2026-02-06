@@ -140,10 +140,9 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
         Node::Init(stmts) => (stmts.get(index).map(|&s| Node::StmtRef(s)), stmts.len()),
         Node::FileUnitRef(r) => (r.stmts.get(index).map(|&s| Node::StmtRef(s)), r.stmts.len()),
         Node::StmtRef(r) => match &r.data {
-            StmtData::AssignStmt { lhs, rhs, .. } => (
-                Some(Node::ExprRef(if index == 0 { lhs } else { rhs })),
-                2,
-            ),
+            StmtData::AssignStmt { lhs, rhs, .. } => {
+                (Some(Node::ExprRef(if index == 0 { lhs } else { rhs })), 2)
+            }
             StmtData::BranchStmt { .. } => (None, 0),
             StmtData::DefStmt { params, body, .. } => (
                 if index < params.len() {
@@ -197,13 +196,16 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
                 },
                 1 + then_arm.len() + else_arm.len(),
             ),
-            StmtData::ReturnStmt { result, .. } => {
-                (result.map(Node::ExprRef), if result.is_some() { 1 } else { 0 })
-            }
+            StmtData::ReturnStmt { result, .. } => (
+                result.map(Node::ExprRef),
+                if result.is_some() { 1 } else { 0 },
+            ),
             StmtData::LoadStmt { module, .. } => (Some(Node::ExprRef(module)), 1),
         },
         Node::ExprRef(r) => match &r.data {
-            ExprData::BinaryExpr { x, y, .. } => (Some(Node::ExprRef(if index == 0 { x } else { y })), 2),
+            ExprData::BinaryExpr { x, y, .. } => {
+                (Some(Node::ExprRef(if index == 0 { x } else { y })), 2)
+            }
             ExprData::CallExpr { func, args, .. } => (
                 if index == 0 {
                     Some(Node::ExprRef(func))
@@ -244,7 +246,9 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
             }
 
             ExprData::DotExpr { x, .. } => (Some(Node::ExprRef(x)), 1),
-            ExprData::IndexExpr { x, y, .. } => (Some(Node::ExprRef(if index == 0 { x } else { y })), 2),
+            ExprData::IndexExpr { x, y, .. } => {
+                (Some(Node::ExprRef(if index == 0 { x } else { y })), 2)
+            }
             ExprData::LambdaExpr { params, body, .. } => (
                 if index < params.len() {
                     params.get(index).map(|&p| Node::ExprRef(p))
@@ -275,7 +279,9 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
             ExprData::TupleExpr { list, .. } => {
                 (list.get(index).map(|&e| Node::ExprRef(e)), list.len())
             }
-            ExprData::UnaryExpr { x, .. } => (x.map(Node::ExprRef), if x.is_some() { 1 } else { 0 }),
+            ExprData::UnaryExpr { x, .. } => {
+                (x.map(Node::ExprRef), if x.is_some() { 1 } else { 0 })
+            }
 
             // no children
             _ => (None, 0),
@@ -320,24 +326,24 @@ mod test {
         let foobar_ident = Ident::new(fake_pos, "foobar");
         let foobar = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::Ident(&foobar_ident),
         };
         let x_ident = Ident::new(fake_pos, "x");
         let x = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::Ident(&x_ident),
         };
         let y_ident = Ident::new(fake_pos, "y");
         let y = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::Ident(&y_ident),
         };
         let three = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::Literal {
                 token_pos: fake_pos,
                 token: &Literal::Int(3),
@@ -345,7 +351,7 @@ mod test {
         };
         let y_expr = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::BinaryExpr {
                 x: &y,
                 op_pos: fake_pos,
@@ -355,7 +361,7 @@ mod test {
         };
         let foobar_expr = Expr {
             id: ID_GEN.next_expr_id(),
-            span: span,
+            span,
             data: ExprData::CallExpr {
                 func: &foobar,
                 lparen: fake_pos,
@@ -365,7 +371,7 @@ mod test {
         };
         let foobar_stmt = Stmt {
             id: ID_GEN.next_stmt_id(),
-            span: span,
+            span,
             data: StmtData::ExprStmt { x: &foobar_expr },
         };
         let _file_unit = FileUnit {
@@ -393,7 +399,7 @@ mod test {
         let arena = Arena::new();
         for test_case in test_cases {
             let res = parse(&arena, test_case.input)?;
-            let mut it = NodeIterator::new(&res.stmts);
+            let mut it = NodeIterator::new(res.stmts);
 
             let mut index = 0;
             let mut want_it = test_case.want.iter();
@@ -406,9 +412,7 @@ mod test {
                 assert_eq!(
                     next.is_some(),
                     next_want.is_some(),
-                    "\nnext:{:?}\nnext_want:{:?}",
-                    next,
-                    next_want
+                    "\nnext:{next:?}\nnext_want:{next_want:?}"
                 );
                 let actual = next.unwrap();
                 let expected = *next_want.unwrap();
@@ -417,7 +421,7 @@ mod test {
                     (Node::StmtRef(x), Node::StmtRef(y)) => assert_eq!(x.data, y.data),
                     (Node::ExprRef(x), Node::ExprRef(y)) => assert_eq!(x.data, y.data),
                     (Node::ClauseRef(x), Node::ClauseRef(y)) => assert_eq!(x, y),
-                    (x, y) => assert!(false, "index {index} \n LEFT {:?} \n\nRIGHT {:?}", x, y),
+                    (x, y) => panic!("index {index} \n LEFT {x:?} \n\nRIGHT {y:?}"),
                 }
                 index += 1;
             }

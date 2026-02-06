@@ -99,8 +99,8 @@ type Result<T> = std::result::Result<T, ResolveError>;
 // which in turn may make the evaluator dynamically assign multiple
 // values to a variable at top-level. (These two roles should be separated.)
 
-pub struct FileUnitWithModule<'a> {
-    pub file_unit: &'a FileUnit<'a>,
+pub struct FileUnitWithModule<'u, 'a> {
+    pub file_unit: &'u FileUnit<'a>,
     pub module: Module<'a>,
 }
 
@@ -243,24 +243,24 @@ pub enum ResolveError {
 // The isUniverse predicate is supplied a parameter to avoid a cyclic
 // dependency upon starlark.Universe, not because users should ever need
 // to redefine it.
-pub fn resolve_file<'a>(
-    file: &'a FileUnit<'a>,
+pub fn resolve_file<'u, 'a>(
+    file: &'u FileUnit<'a>,
     arena: &'a Arena,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
-) -> std::result::Result<FileUnitWithModule<'a>, Vec<ResolveError>> {
+) -> std::result::Result<FileUnitWithModule<'u, 'a>, Vec<ResolveError>> {
     repl_chunk(file, arena, None, is_predeclared, is_universal)
 }
 
 // REPLChunk is a generalization of the File function that supports a
 // non-empty initial global block, as occurs in a REPL.
-pub fn repl_chunk<'a>(
-    file_unit: &'a FileUnit<'a>,
+pub fn repl_chunk<'u, 'a>(
+    file_unit: &'u FileUnit<'a>,
     arena: &'a Arena,
     is_global: Option<fn(&str) -> bool>,
     is_predeclared: fn(&str) -> bool,
     is_universal: fn(&str) -> bool,
-) -> std::result::Result<FileUnitWithModule<'a>, Vec<ResolveError>> {
+) -> std::result::Result<FileUnitWithModule<'u, 'a>, Vec<ResolveError>> {
     let mut r = Resolver::new(
         arena,
         file_unit.path,
@@ -523,7 +523,7 @@ impl<'arena> Resolver<'arena> {
         if env == FILE_BLOCK {
             let bind = self.use_top_level(u); // file-local, global, predeclared, or not found
             if DEBUG {
-                println!("= {:?}\n", bind);
+                println!("= {bind:?}\n");
             }
             return bind;
         }
@@ -546,8 +546,8 @@ impl<'arena> Resolver<'arena> {
         let mut binding_to_add: Option<Binding> = None;
         {
             let bind = &self.bindings.borrow()[bindx.0];
-            if let Some(fun_index) = b.function {
-                if matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell) {
+            if let Some(fun_index) = b.function
+                && matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell) {
                     let function = &self.functions.borrow()[fun_index];
                     // Found in parent block, which belongs to enclosing function.
                     // Add the parent's binding to the function's freevars,
@@ -570,8 +570,7 @@ impl<'arena> Resolver<'arena> {
                         scope: RefCell::new(Scope::Free),
                         index,
                     });
-                }
-            };
+                };
         }
         if let Some(bind) = binding_to_add {
             bindx = self.new_binding(bind)
@@ -853,13 +852,12 @@ impl<'arena> Resolver<'arena> {
                 },
                 Some(bindx) => (*bindx, true),
             };
-            if !ok {
-                if let Entry::Vacant(e) = self.globals.borrow_mut().entry(id.name) {
+            if !ok
+                && let Entry::Vacant(e) = self.globals.borrow_mut().entry(id.name) {
                     // first global binding of this name
                     bindx = self.push_module_global(id);
                     e.insert(bindx);
                 }
-            }
             // Assuming !self.options.GlobalReassign
             if ok {
                 let bind = &self.bindings.borrow()[bindx.0];
@@ -1240,7 +1238,7 @@ impl<'arena> Resolver<'arena> {
             }
             ExprData::ParenExpr { x, .. } => self.expr(env, x),
 
-            _ => panic!("unexpected expr {:?}", e),
+            _ => panic!("unexpected expr {e:?}"),
         }
     }
 
@@ -1304,15 +1302,14 @@ impl<'arena> Resolver<'arena> {
                     } else if star.is_some() {
                         num_kwonly_params += 1
                     }
-                    if let ExprData::Ident(id) = x.data {
-                        if self.bind(env, id) {
+                    if let ExprData::Ident(id) = x.data
+                        && self.bind(env, id) {
                             self.push_error(ResolveError::DuplicateParameter {
                                 path: self.path_string(),
                                 pos: *op_pos,
                                 name: id.name.to_string(),
                             });
                         }
-                    }
                     seen_optional = true
                 }
                 ExprData::UnaryExpr { op, op_pos, x, .. } => {
@@ -1345,7 +1342,7 @@ impl<'arena> Resolver<'arena> {
                     }
                 }
                 _ => {
-                    panic!("unexpected {:?}", param)
+                    panic!("unexpected {param:?}")
                 }
             }
         }
@@ -1422,24 +1419,26 @@ impl<'arena> Resolver<'arena> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use googletest::prelude::*;
 
-    use crate::{parse, FileUnit, Mode};
-    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<FileUnitWithModule<'a>> {
-        let file_unit = parse(&arena, input)?;
-        resolve_file(file_unit, &arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
+    use crate::{FileUnit, Mode, parse};
+    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<(FileUnit<'a>, Module<'a>)> {
+        let file_unit = parse(arena, input)?;
+        let res = resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
+        let FileUnitWithModule { module, .. } = res;
+        Ok((file_unit, module))
     }
 
     #[test]
     fn basic_file_global() -> Result<()> {
         let arena = Arena::new();
         let input = "a = 3";
-        let f = prepare(&arena, input)?;
+        let (file_unit, module) = prepare(&arena, input)?;
 
-        assert_eq!(f.module.globals.len(), 1);
-        let bx = f.module.globals[0];
-        let b = &f.module.bindings[bx.0];
+        assert_eq!(module.globals.len(), 1);
+        let bx = module.globals[0];
+        let b = &module.bindings[bx.0];
         assert_that!(b.get_scope(), eq(Scope::Global));
         assert_that!(b.index, eq(0));
         if let Some(id) = b.first {
@@ -1498,18 +1497,18 @@ mod tests {
     fn basic_file_local() -> Result<()> {
         let arena = Arena::new();
         let input = "def f(b):\n  a = b\na = 2";
-        let f = prepare(&arena, input)?;
+        let (file_unit, module) = prepare(&arena, input)?;
 
-        assert_eq!(f.module.globals.len(), 2);
-        let bx = f.module.globals[0];
-        let b = &f.module.bindings[bx.0];
+        assert_eq!(module.globals.len(), 2);
+        let bx = module.globals[0];
+        let b = &module.bindings[bx.0];
 
         assert_that!(b.get_scope(), eq(Scope::Global));
         assert_eq!(b.index, 0);
         assert_that!(b.first, ident_has_name("f"));
 
-        let bx = &f.module.globals[1];
-        let b = &f.module.bindings[bx.0];
+        let bx = &module.globals[1];
+        let b = &module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 1);
         assert_that!(b.first, ident_has_name("a"));
@@ -1521,23 +1520,23 @@ mod tests {
     fn load_comprehension_local() -> Result<()> {
         let arena = Arena::new();
         let input = "load('foo.sl', 'bar', baz='bak')\n[x for x in baz if bar]";
-        let f = prepare(&arena, input)?;
+        let (file_unit, module) = prepare(&arena, input)?;
 
-        assert_eq!(f.module.locals.len(), 3);
-        let bx = f.module.locals[0];
-        let b = &f.module.bindings[bx.0];
+        assert_eq!(module.locals.len(), 3);
+        let bx = module.locals[0];
+        let b = &module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 0);
         assert_that!(b.first, ident_has_name("bar"));
 
-        let bx = f.module.locals[1];
-        let b = &f.module.bindings[bx.0];
+        let bx = module.locals[1];
+        let b = &module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 1);
         assert_that!(b.first, ident_has_name("baz"));
 
-        let bx = f.module.locals[2];
-        let b = &f.module.bindings[bx.0];
+        let bx = module.locals[2];
+        let b = &module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Local);
         assert_eq!(b.index, 2);
         assert_that!(b.first, ident_has_name("x"));
@@ -1558,41 +1557,41 @@ def nested(x):   # x has Scope::Cell
   update(e)
   return e
 ";
-        let f = prepare(&arena, input)?;
-        assert_eq!(f.module.globals.len(), 1);
-        let bx = &f.module.globals[0];
-        let b = &f.module.bindings[bx.0];
+        let (file_unit, module) = prepare(&arena, input)?;
+        assert_eq!(module.globals.len(), 1);
+        let bx = &module.globals[0];
+        let b = &module.bindings[bx.0];
         assert_eq!(b.get_scope(), Scope::Global);
         assert_eq!(b.index, 0);
         assert_that!(b.first, ident_has_name("nested"));
 
-        assert_eq!(f.file_unit.stmts.len(), 1);
+        assert_eq!(file_unit.stmts.len(), 1);
         if let StmtData::DefStmt {
             function,
             def_pos,
             body,
             ..
-        } = &f.file_unit.stmts[0].data
+        } = &file_unit.stmts[0].data
         {
             if let Some(fun_index) = *function.borrow() {
-                let fun = &f.module.functions[fun_index];
+                let fun = &module.functions[fun_index];
                 assert_eq!(fun.free_vars.borrow().len(), 0);
                 let locals = &fun.locals.borrow();
                 assert_eq!(locals.len(), 3);
 
-                let local = &f.module.bindings[locals[0].0];
+                let local = &module.bindings[locals[0].0];
                 assert_eq!(local.get_scope(), Scope::Cell);
                 assert_that!(local.first, ident_has_name("x"));
 
-                let local = &f.module.bindings[locals[1].0];
+                let local = &module.bindings[locals[1].0];
                 assert_eq!(local.get_scope(), Scope::Local);
                 assert_that!(local.first, ident_has_name("update"));
 
-                let local = &f.module.bindings[locals[2].0];
+                let local = &module.bindings[locals[2].0];
                 assert_eq!(local.get_scope(), Scope::Local);
                 assert_that!(local.first, ident_has_name("e"));
 
-                assert!(body.len() > 0);
+                assert!(!body.is_empty());
                 if let StmtData::DefStmt {
                     function,
                     def_pos,
@@ -1601,11 +1600,11 @@ def nested(x):   # x has Scope::Cell
                 } = &body[0].data
                 {
                     if let Some(fun_index) = *function.borrow() {
-                        let fun = &f.module.functions[fun_index];
+                        let fun = &module.functions[fun_index];
 
                         assert_eq!(fun.free_vars.borrow().len(), 1);
                         let bindx = fun.free_vars.borrow()[0];
-                        let bind = &f.module.bindings[bindx.0];
+                        let bind = &module.bindings[bindx.0];
 
                         assert_eq!(bind.get_scope(), Scope::Cell);
                         assert_that!(bind.first, ident_has_name("x"));
@@ -1613,10 +1612,10 @@ def nested(x):   # x has Scope::Cell
                         let locals = fun.locals.borrow();
                         assert_eq!(locals.len(), 2);
 
-                        let local = &f.module.bindings[locals[0].0];
+                        let local = &module.bindings[locals[0].0];
                         assert_that!(local.first, ident_has_name("d"));
 
-                        let local = &f.module.bindings[locals[1].0];
+                        let local = &module.bindings[locals[1].0];
                         assert_that!(local.first, ident_has_name("f"));
 
                         if let StmtData::DefStmt {
@@ -1626,11 +1625,11 @@ def nested(x):   # x has Scope::Cell
                             ..
                         } = &body[0].data
                         {
-                            let fun = &f.module.functions[fun_index];
+                            let fun = &module.functions[fun_index];
 
                             assert_eq!(fun.free_vars.borrow().len(), 1);
                             let bindx = fun.free_vars.borrow()[0];
-                            let bind = &f.module.bindings[bindx.0];
+                            let bind = &module.bindings[bindx.0];
 
                             assert_eq!(bind.get_scope(), Scope::Cell);
                             assert_that!(bind.first, ident_has_name("x"));
@@ -1645,7 +1644,7 @@ def nested(x):   # x has Scope::Cell
                             } = &body[0].data
                             {
                                 let bindx = id.binding.borrow().unwrap();
-                                let local = &f.module.bindings[bindx.0];
+                                let local = &module.bindings[bindx.0];
                                 assert_eq!(local.get_scope(), Scope::Free);
                                 assert_that!(bind.first, ident_has_name("x"));
                                 Ok(())
@@ -1687,7 +1686,7 @@ def fib(n):
     y = x + tmp
   return y
 ";
-        let f = prepare(&arena, input)?;
+        let _ = prepare(&arena, input)?;
         Ok(())
     }
 
@@ -1707,7 +1706,7 @@ def fib(n):
         } else {
             Err(anyhow!(
                 "expected error due to undefined var {:?}.",
-                f.unwrap().file_unit
+                f.unwrap().0
             ))
         }
     }
@@ -1721,7 +1720,7 @@ def spec_says_fails_at_runtime(n):
     i = i + 1
   return i
 ";
-        let f = prepare(&arena, input)?;
+        let _ = prepare(&arena, input)?;
         Ok(())
     }
 
@@ -1736,7 +1735,7 @@ def bar(x):
 
 y = bar(1)
 "#;
-        let f = prepare(&arena, input)?;
+        let _ = prepare(&arena, input)?;
         Ok(())
     }
 }

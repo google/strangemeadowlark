@@ -20,10 +20,10 @@ use std::fmt::Display;
 use std::rc::Rc;
 use std::sync::Mutex;
 
+use crate::Arena;
 use crate::binding::{BindingIndex, Module, Scope};
 use crate::scan::Position;
 use crate::value::{StarlarkType, Value};
-use crate::Arena;
 use crate::{ExprData, ExprRef, Ident, Literal, StmtData, StmtRef, Token};
 
 /// Lowered representation of a function body.
@@ -206,7 +206,7 @@ struct LocalDef<'a> {
 impl Display for LocalDef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.name {
-            Some(Ident { name: id, .. }) => write!(f, "{}", id),
+            Some(Ident { name: id, .. }) => write!(f, "{id}"),
             None => write!(f, "<local>"),
         }
     }
@@ -214,7 +214,7 @@ impl Display for LocalDef<'_> {
 
 impl std::fmt::Debug for LocalDef<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -364,7 +364,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 Rvalue::BinaryOp(BinOp::Div, left, Operand::Local(tmp_right))
             }
             Some(op) => Rvalue::BinaryOp(op, left, right),
-            _ => panic!("token {} cannot be binary op", op),
+            _ => panic!("token {op} cannot be binary op"),
         }
     }
 
@@ -551,7 +551,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         let n = self.locals.len();
 
         // for debugging only
-        let name = self.arena.alloc_str(format!("_{}", n).as_str());
+        let name = self.arena.alloc_str(format!("_{n}").as_str());
         self.locals.push(LocalDef {
             name: Some(self.arena.alloc(Ident::new(Position::new(), name))),
         });
@@ -672,13 +672,13 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         use std::fmt::Write;
         let mut s = String::new();
         for (i, b) in self.blocks.iter().enumerate() {
-            write!(s, "Block {} ;;", i).expect("could not write block");
+            write!(s, "Block {i} ;;").expect("could not write block");
             match &b.function_info {
-                Some(info) => writeln!(s, " function {}", info).unwrap(),
+                Some(info) => writeln!(s, " function {info}").unwrap(),
                 _ => writeln!(s).unwrap(),
             };
             for instr in &b.instructions {
-                writeln!(s, "  {:?}", instr).expect("could not write instruction");
+                writeln!(s, "  {instr:?}").expect("could not write instruction");
             }
             writeln!(s, "  {:?}", b.terminator).expect("could not write terminator");
         }
@@ -1355,24 +1355,26 @@ impl BinOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse, resolve::FileUnitWithModule, resolve_file, StmtData};
+    use crate::{FileUnit, StmtData, parse, resolve_file, resolve::FileUnitWithModule};
 
     use super::*;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
 
-    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<FileUnitWithModule<'a>> {
-        let file_unit = parse(&arena, input)?;
-        resolve_file(file_unit, &arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))
+    fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<(FileUnit<'a>, Module<'a>)> {
+        let file_unit = parse(arena, input)?;
+        let res = resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
+        let FileUnitWithModule { module, .. } = res;
+        Ok((file_unit, module))
     }
 
     #[test]
     fn test_empty() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(&arena, "def foo():\n  return\n")?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        let (file_unit, module) = prepare(&arena, "def foo():\n  return\n")?;
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
 
                 assert_eq!(builder.blocks.len(), 1);
@@ -1381,7 +1383,7 @@ mod tests {
                 assert_eq!(bb.terminator, Terminator::Return);
 
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[], &fm.module), Value::None);
+                assert_eq!(lowered.run(&[], &module), Value::None);
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1391,11 +1393,11 @@ mod tests {
     #[test]
     fn test_basic() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(&arena, "def foo(x):\n  return x + 2\n")?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        let (file_unit, module) = prepare(&arena, "def foo(x):\n  return x + 2\n")?;
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
 
                 builder.build_mir(f.borrow().unwrap());
 
@@ -1419,7 +1421,7 @@ mod tests {
                 assert_eq!(bb.terminator, Terminator::Return);
 
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[Value::Int(5)], &fm.module), Value::Int(7));
+                assert_eq!(lowered.run(&[Value::Int(5)], &module), Value::Int(7));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1429,7 +1431,7 @@ mod tests {
     #[test]
     fn test_body() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(
+        let (file_unit, module) = prepare(
             &arena,
             "
 def fib(n):
@@ -1448,14 +1450,14 @@ def fib(n):
   return y
 ",
         )?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[Value::Int(4)], &fm.module), Value::Int(5));
-                assert_eq!(lowered.run(&[Value::Int(5)], &fm.module), Value::Int(8));
+                assert_eq!(lowered.run(&[Value::Int(4)], &module), Value::Int(5));
+                assert_eq!(lowered.run(&[Value::Int(5)], &module), Value::Int(8));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1465,7 +1467,7 @@ def fib(n):
     #[test]
     fn test_nested_nofree() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(
+        let (file_unit, module) = prepare(
             &arena,
             "
 def foo(x):
@@ -1474,17 +1476,17 @@ def foo(x):
   return bar(x)
 ",
         )?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt {
                 function: f,
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
-                assert_eq!(lowered.run(&[Value::Int(1)], &fm.module), Value::Int(2));
+                assert_eq!(lowered.run(&[Value::Int(1)], &module), Value::Int(2));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1494,7 +1496,7 @@ def foo(x):
     #[test]
     fn test_nested_simple() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(
+        let (file_unit, module) = prepare(
             &arena,
             "
 def foo(x):
@@ -1503,18 +1505,18 @@ def foo(x):
   return bar()
     ",
         )?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt {
                 function: f,
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
-                assert_eq!(lowered.run(&[Value::Int(2)], &fm.module), Value::Int(3));
+                assert_eq!(lowered.run(&[Value::Int(2)], &module), Value::Int(3));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1524,7 +1526,7 @@ def foo(x):
     #[test]
     fn test_nested_cell() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(
+        let (file_unit, module) = prepare(
             &arena,
             "
 def foo(x):
@@ -1535,18 +1537,18 @@ def foo(x):
   return bar(x)
     ",
         )?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt {
                 function: f,
                 params,
                 ..
             } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
-                assert_eq!(lowered.run(&[Value::Int(2)], &fm.module), Value::Int(4));
+                assert_eq!(lowered.run(&[Value::Int(2)], &module), Value::Int(4));
                 Ok(())
             }
             x => Err(anyhow!("expected defstmt got {:?}", x)),
@@ -1556,59 +1558,59 @@ def foo(x):
     #[test]
     fn test_and_sanity() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(&arena, "def fooand(x, y):\n  return x and y\n")?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        let (file_unit, module) = prepare(&arena, "def fooand(x, y):\n  return x and y\n")?;
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
                 // Sanity
                 assert_eq!(
-                    lowered.run(&[Value::Bool(true), Value::Bool(true)], &fm.module),
+                    lowered.run(&[Value::Bool(true), Value::Bool(true)], &module),
                     Value::Bool(true)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(false), Value::Bool(true)], &fm.module),
+                    lowered.run(&[Value::Bool(false), Value::Bool(true)], &module),
                     Value::Bool(false)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(true), Value::Bool(false)], &fm.module),
+                    lowered.run(&[Value::Bool(true), Value::Bool(false)], &module),
                     Value::Bool(false)
                 );
                 assert_eq!(
-                    lowered.run(&[Value::Bool(false), Value::Bool(false)], &fm.module),
+                    lowered.run(&[Value::Bool(false), Value::Bool(false)], &module),
                     Value::Bool(false)
                 );
                 Ok(())
             }
-            x => return Err(anyhow!("expected defstmt got {:?}", x)),
+            x => Err(anyhow!("expected defstmt got {:?}", x)),
         }
     }
 
     #[test]
     fn test_and_shortcut() -> Result<()> {
         let arena = Arena::new();
-        let fm = prepare(&arena, "def fooshort(x):\n  return x and 1/0\n")?;
-        assert_eq!(fm.file_unit.stmts.len(), 1);
-        match &fm.file_unit.stmts[0].data {
+        let (file_unit, module) = prepare(&arena, "def fooshort(x):\n  return x and 1/0\n")?;
+        assert_eq!(file_unit.stmts.len(), 1);
+        match &file_unit.stmts[0].data {
             StmtData::DefStmt { function: f, .. } => {
-                let mut builder = MirBuilder::new(&arena, &fm.module);
+                let mut builder = MirBuilder::new(&arena, &module);
                 builder.build_mir(f.borrow().unwrap());
                 let lowered = builder.lowered();
 
                 assert_eq!(
-                    lowered.run(&[Value::Bool(false)], &fm.module),
+                    lowered.run(&[Value::Bool(false)], &module),
                     Value::Bool(false)
                 );
                 assert!(matches!(
-                    lowered.run(&[Value::Bool(true)], &fm.module),
+                    lowered.run(&[Value::Bool(true)], &module),
                     Value::Abort(_)
                 ));
                 Ok(())
             }
-            x => return Err(anyhow!("expected defstmt got {:?}", x)),
+            x => Err(anyhow!("expected defstmt got {:?}", x)),
         }
     }
 }

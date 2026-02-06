@@ -123,13 +123,13 @@ pub fn parse_with_mode<'arena, P: AsRef<Path>>(
     path: &'arena P,
     src: &'arena str,
     mode: Mode,
-) -> Result<&'arena FileUnit<'arena>> {
+) -> Result<FileUnit<'arena>> {
     let mut p = Parser::new(arena, path, src, mode)?;
     p.parse_file()
 }
 
 /// Convenience method that calls parse_with_mode with path "unknown" and Mode::Plain.
-pub fn parse<'arena>(arena: &'arena Arena, src: &'arena str) -> Result<&'arena FileUnit<'arena>> {
+pub fn parse<'arena>(arena: &'arena Arena, src: &'arena str) -> Result<FileUnit<'arena>> {
     parse_with_mode(arena, &UNKNOWN, src, Mode::Plain)
 }
 
@@ -214,8 +214,7 @@ impl<'arena> Parser<'arena> {
     }
 
     // file_input = (NEWLINE | stmt)* EOF
-    fn parse_file(&mut self) -> Result<&'arena FileUnit<'arena>>
-where {
+    fn parse_file(&mut self) -> Result<FileUnit<'arena>> {
         let mut stmts: Vec<StmtRef<'arena>> = vec![];
         while self.tok.kind != Token::Eof {
             if self.tok.kind == Token::Newline {
@@ -228,7 +227,7 @@ where {
         let suffix_comments = &*self.arena.alloc_slice_copy(&self.sc.suffix_comments);
 
         self.assign_line_comments(NodeIterator::new(&stmts));
-        let f = self.arena.alloc(FileUnit {
+        let f = FileUnit {
             path: self.path,
             stmts: self.arena.alloc_slice_copy(&stmts.into_boxed_slice()),
             line_comments,
@@ -237,7 +236,7 @@ where {
             comments_suffix: self.comments_suffix.clone(),
 
             comments_after: self.comments_after.clone(),
-        });
+        };
         Ok(f)
     }
 
@@ -1541,21 +1540,23 @@ where {
 
         while comment_idx < self.sc.line_comments.len() {
             let c = self.sc.line_comments[comment_idx];
-            
+
             // Find the first node that starts after this comment.
             let mut associated_node_id = None;
             while let Some(node) = node_it.peek() {
-                if let Some(span) = node.span() {
-                    if c.start.is_before(&span.start) {
+                if let Some(span) = node.span()
+                    && c.start.is_before(&span.start) {
                         associated_node_id = node.id();
                         break;
                     }
-                }
                 node_it.next();
             }
 
             if let Some(id) = associated_node_id {
-                self.comments_before.entry(id).or_default().push(comment_idx);
+                self.comments_before
+                    .entry(id)
+                    .or_default()
+                    .push(comment_idx);
             } else {
                 // No node after this comment, it goes to comments_after of the last node?
                 // Or just keep it as trailing comments for the file.
@@ -1798,7 +1799,7 @@ mod test {
                     let s = format!("{}", expr.data);
                     assert_that!(s, eq(test_case.want))
                 }
-                Err(msg) => assert!(false, "{}", msg),
+                Err(msg) => panic!("{msg}"),
             }
         }
     }
@@ -1923,7 +1924,7 @@ def h():
         ];
         for test_case in test_cases {
             match super::parse(&arena, test_case.input) {
-                Ok(file_unit) if file_unit.stmts.len() >= 1 => {
+                Ok(file_unit) if !file_unit.stmts.is_empty() => {
                     let s = format!("{}", file_unit.stmts[0].data);
                     assert_that!(s, eq(test_case.want))
                 }

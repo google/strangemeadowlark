@@ -34,7 +34,7 @@ use id_gen::ID_GEN;
 
 pub use arena::Arena;
 pub use mir::{Lowered, MirBuilder};
-pub use parse::{parse, parse_expr, parse_with_mode, Mode, ParseError};
+pub use parse::{Mode, ParseError, parse, parse_expr, parse_with_mode};
 pub use print::Printer;
 pub use resolve::resolve_file;
 pub use syntax::*;

@@ -15,9 +15,9 @@
 use std::borrow::Borrow;
 use std::cell::RefCell;
 
+use crate::Ident;
 use crate::scan::Position;
 use crate::syntax::{Expr, Stmt};
-use crate::Ident;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Scope {
@@ -32,7 +32,7 @@ pub enum Scope {
 
 impl std::fmt::Display for Scope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

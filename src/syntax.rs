@@ -253,7 +253,7 @@ impl Display for StmtData<'_> {
                 "(AssignStmt Op={} LHS={} RHS={})",
                 op, lhs.data, rhs.data
             ),
-            StmtData::BranchStmt { token, .. } => write!(f, "(BranchStmt Token={})", token),
+            StmtData::BranchStmt { token, .. } => write!(f, "(BranchStmt Token={token})"),
             StmtData::DefStmt {
                 name, params, body, ..
             } => {
@@ -591,7 +591,7 @@ impl Display for ExprData<'_> {
                     body.data
                 )?;
                 for clause in clauses.iter() {
-                    write!(f, "{},", clause)?;
+                    write!(f, "{clause},")?;
                 }
                 write!(f, "))")
             }
@@ -638,7 +638,7 @@ impl Display for ExprData<'_> {
                 }
                 write!(f, "))")
             }
-            ExprData::Literal { token, .. } => write!(f, "{}", token),
+            ExprData::Literal { token, .. } => write!(f, "{token}"),
             ExprData::ParenExpr { x, .. } => {
                 write!(f, "(ParenExpr X={})", x.data)
             }
@@ -666,7 +666,7 @@ impl Display for ExprData<'_> {
             }
             ExprData::UnaryExpr { op, x, .. } => match x {
                 Some(x) => write!(f, "(UnaryExpr Op={} X={})", op, x.data),
-                _ => write!(f, "(UnaryExpr Op={})", op),
+                _ => write!(f, "(UnaryExpr Op={op})"),
             },
         }
     }
@@ -686,9 +686,9 @@ impl Display for Literal<'_> {
         match self {
             Literal::String(s) => write!(f, "{}", quote(s)),
             Literal::Bytes(s) => write!(f, "{}", quote_bytes(s)),
-            Literal::Int(i) => write!(f, "{}", i),
-            Literal::BigInt(bi) => write!(f, "{}", bi),
-            Literal::Float(fl) => write!(f, "{}", fl),
+            Literal::Int(i) => write!(f, "{i}"),
+            Literal::BigInt(bi) => write!(f, "{bi}"),
+            Literal::Float(fl) => write!(f, "{fl}"),
         }
     }
 }

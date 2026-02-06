@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::{env, fs::read_to_string};
-use strangemeadowlark::{parse_with_mode, resolve_file, Arena, Mode, Printer};
+use strangemeadowlark::{Arena, Mode, Printer, parse_with_mode, resolve_file};
 
 // E.g. cargo run --example test_parse third_party/mangle/BUILD
 fn main() -> Result<()> {
@@ -22,19 +22,19 @@ fn main() -> Result<()> {
         return Err(anyhow!("need exactly one arg"));
     }
 
-    let path = env::args().into_iter().nth(1).unwrap();
+    let path = env::args().nth(1).unwrap();
     let src = read_to_string(&path)?;
     let arena = Arena::new();
     let unit = parse_with_mode(&arena, &path, &src, Mode::RetainComments)?;
-    let _fm = resolve_file(unit, &arena, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
+    let _fm = resolve_file(&unit, &arena, |_| false, |_| false).map_err(|e| anyhow!("{e:?}"))?;
 
     for stmt in unit.stmts {
         println!("{}", stmt.data);
     }
     let mut buf = String::new();
-    let mut printer = Printer::new(unit, &mut buf);
+    let mut printer = Printer::new(&unit, &mut buf);
     printer.print_file_unit()?;
-    println!("{}", buf);
+    println!("{buf}");
 
     Ok(())
 }

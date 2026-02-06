@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-02-06
+
+### ⚠️ Breaking Changes
+
+- `parse` and `parse_with_mode` now return `Result<FileUnit>` instead of `Result<&FileUnit>`. This fixes memory leaks but requires callers to manage ownership of the `FileUnit`. Callers passing the result to functions like `resolve_file` will need to pass a reference (e.g., `&unit`).
+- `FileUnitWithModule` now has two lifetime parameters: `FileUnitWithModule<'u, 'a>` to decouple the `FileUnit` reference lifetime from the arena lifetime.
+
+### 🚀 Features
+
+- Implement `buildifier`-style pretty printing (4-space indent, `load` sorting, comment preservation).
+- Remove vendored `third_party` dependencies in favor of crates.io.
+
+### 🐛 Bug Fixes
+
+- Fix scanner bug where incorrect outdent tokens were emitted at EOF.
+- Fix AST walker to support all statement and expression variants.
+- Fix memory leak in `FileUnit` (by returning by value).
+
 ## [0.4.7] - 2025-04-27
 
 ### ⚙️ Miscellaneous Tasks

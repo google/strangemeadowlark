@@ -146,7 +146,12 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                     quoted = &quoted[1..];
                 }
                 if !is_byte && n > 127 {
-                    return Err(anyhow!("non-ASCII octal escape \\{:o} (use \\u{:04x} for the UTF-8 encoding of U+{:04x})", n, n, n));
+                    return Err(anyhow!(
+                        "non-ASCII octal escape \\{:o} (use \\u{:04x} for the UTF-8 encoding of U+{:04x})",
+                        n,
+                        n,
+                        n
+                    ));
                 }
                 if n >= 256 {
                     // NOTE: Python silently discards the high bit,
@@ -164,8 +169,12 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
                 match u32::from_str_radix(&quoted[2..4], 16) {
                     Ok(n) => {
                         if !is_byte && n > 127 {
-                            return Err(anyhow!("non-ASCII hex escape {} (use \\u{:04X} for the UTF-8 encoding of U+{:04x})",
-                        &quoted[..4], n, n));
+                            return Err(anyhow!(
+                                "non-ASCII hex escape {} (use \\u{:04X} for the UTF-8 encoding of U+{:04x})",
+                                &quoted[..4],
+                                n,
+                                n
+                            ));
                         }
                         let decoded_ch = char::from_u32(n);
                         if decoded_ch.is_none() {
@@ -219,7 +228,7 @@ pub fn unquote(quoted_str: &str) -> anyhow::Result<DecodedSequence> {
             // (Python still treats unnecessary backslashes literally,
             // but since 3.6 has emitted a deprecation warning.)
             {
-                return Err(anyhow!("invalid escape sequence \\{}", quoted))
+                return Err(anyhow!("invalid escape sequence \\{}", quoted));
             }
         }
     }
@@ -253,7 +262,7 @@ pub fn quote(s: &str) -> String {
 pub fn quote_bytes(b: &[u8]) -> String {
     let mut buf = "\"".to_string();
     for c in b {
-        buf.push_str(format!("\\x{:02x}", c).as_str());
+        buf.push_str(format!("\\x{c:02x}").as_str());
     }
     buf.push('"');
     buf

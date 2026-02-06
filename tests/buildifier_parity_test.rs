@@ -12,23 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use strangemeadowlark::{parse_with_mode, Arena, Mode, pretty::pretty};
 use googletest::prelude::*;
-use std::process::{Command, Stdio};
 use std::io::Write;
+use std::process::{Command, Stdio};
+use strangemeadowlark::{Arena, Mode, parse_with_mode, pretty::pretty};
 
 fn buildify(input: &str) -> Option<String> {
     let mut child = match Command::new("buildifier")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .spawn() {
-            Ok(child) => child,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(e) => panic!("Failed to spawn buildifier: {}", e),
-        };
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("Failed to spawn buildifier: {e}"),
+    };
 
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
-    stdin.write_all(input.as_bytes()).expect("Failed to write to stdin");
+    stdin
+        .write_all(input.as_bytes())
+        .expect("Failed to write to stdin");
     drop(stdin);
 
     let output = child.wait_with_output().expect("Failed to read stdout");
@@ -38,7 +41,7 @@ fn buildify(input: &str) -> Option<String> {
 fn assert_parity(src: &str) {
     let arena = Arena::new();
     let unit = parse_with_mode(&arena, &"<test>", src, Mode::RetainComments).unwrap();
-    let my_output = pretty(unit);
+    let my_output = pretty(&unit);
     let buildifier_output = match buildify(src) {
         Some(output) => output,
         None => {
@@ -128,20 +131,23 @@ fn test_parity_long_args() -> googletest::prelude::Result<()> {
     // This string is long enough that it might wrap.
     // Buildifier wraps args if they don't fit.
     // We'll see if our pretty printer matches.
-    // We intentionally use a long line that *should* fit in 100 chars (if small indent) 
+    // We intentionally use a long line that *should* fit in 100 chars (if small indent)
     // or definitely NOT fit if we make it super long.
     // Let's try one that is clearly single line for now to ensure no regression,
     // and one that forces wrap.
-    
+
     // Simple fit
     assert_parity("f(1, 2, 3, 4, 5, 6)\n");
 
     // Long line that should wrap
     // Buildifier wraps lists of arguments if they are too long.
     // We use many arguments to exceed the limit.
-    let args = (0..30).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
-    let src = format!("f({})\n", args);
-    assert_parity(&src); 
-    
+    let args = (0..30)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!("f({args})\n");
+    assert_parity(&src);
+
     Ok(())
 }
