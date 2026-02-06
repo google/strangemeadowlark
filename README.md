@@ -15,6 +15,26 @@ try [starlark-rust](https://github.com/facebook/starlark-rust) instead.
 
 ## Development
 
+### Testing
+
+To run the standard test suite:
+
+```bash
+cargo test
+```
+
+#### Buildifier Parity Tests
+
+This project includes integration tests that verify the pretty-printed output against `buildifier`, the standard formatter for Starlark. These tests ensure that `strangemeadowlark` produces output that is consistent with the canonical style.
+
+To run these tests specifically:
+
+```bash
+cargo test --test buildifier_parity_test
+```
+
+**Note:** These tests require the `buildifier` binary to be installed and available in your system's `PATH`. If `buildifier` is not found, the tests will be skipped automatically (marked as passed with a message).
+
 ### Test with Leak Sanitizer
 
 This library uses `bumpalo` and an AST that is using references. This has the

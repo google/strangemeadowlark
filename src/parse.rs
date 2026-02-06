@@ -19,7 +19,7 @@ use std::path::Path;
 use crate::scan::*;
 use crate::syntax::{StmtData::*, *};
 use crate::token::*;
-use crate::{Arena, ID_GEN};
+use crate::{Arena, ID_GEN, NodeIterator};
 use thiserror::Error;
 
 // This file defines a recursive-descent parser for Starlark.
@@ -54,7 +54,9 @@ pub enum ParseError {
     },
     #[error("{path}:{pos} first operand of load statement must be a string literal")]
     LoadFirstArgMustBeString { path: String, pos: Position },
-    #[error("{path}:{pos} load operand must be {name:?} or {name:?}=\"originalname\" (want '=' after {name:?})")]
+    #[error(
+        "{path}:{pos} load operand must be {name:?} or {name:?}=\"originalname\" (want '=' after {name:?})"
+    )]
     LoadArgMustBeNameOrBind {
         path: String,
         pos: Position,
@@ -143,9 +145,11 @@ struct Parser<'arena> {
     pos: Position,
     arena: &'arena Arena,
     path: &'arena Path,
-    comments_before: HashMap<usize, usize>,
-    comments_suffix: HashMap<usize, usize>,
-    comments_after: HashMap<usize, usize>,
+    comments_before: HashMap<usize, Vec<usize>>,
+    comments_suffix: HashMap<usize, Vec<usize>>,
+    comments_after: HashMap<usize, Vec<usize>>,
+    assigned_line_comment: Option<usize>,
+    assigned_suffix_comment: Option<usize>,
 }
 
 impl<'arena> Parser<'arena> {
@@ -169,6 +173,8 @@ impl<'arena> Parser<'arena> {
             comments_before: HashMap::new(),
             comments_suffix: HashMap::new(),
             comments_after: HashMap::new(),
+            assigned_line_comment: None,
+            assigned_suffix_comment: None,
         })
     }
 
@@ -221,11 +227,16 @@ where {
         let line_comments = &*self.arena.alloc_slice_copy(&self.sc.line_comments);
         let suffix_comments = &*self.arena.alloc_slice_copy(&self.sc.suffix_comments);
 
+        self.assign_line_comments(NodeIterator::new(&stmts));
         let f = self.arena.alloc(FileUnit {
             path: self.path,
             stmts: self.arena.alloc_slice_copy(&stmts.into_boxed_slice()),
             line_comments,
             suffix_comments,
+            comments_before: self.comments_before.clone(),
+            comments_suffix: self.comments_suffix.clone(),
+
+            comments_after: self.comments_after.clone(),
         });
         Ok(f)
     }
@@ -529,7 +540,7 @@ where {
                         path: self.path_string(),
                         pos: self.pos,
                         actual: self.tok.kind.clone(),
-                    })
+                    });
                 }
             }
         }
@@ -1372,8 +1383,8 @@ where {
         loop {
             if self.tok.kind == Token::Not {
                 self.next_token()?; // consume NOT
-                                    // In this context, NOT must be followed by IN.
-                                    // Replace NOT IN by a single NOT_IN token.
+                // In this context, NOT must be followed by IN.
+                // Replace NOT IN by a single NOT_IN token.
                 if self.tok.kind != Token::In {
                     return Err(ParseError::UnexpectedToken {
                         path: self.path_string(),
@@ -1400,7 +1411,7 @@ where {
                             pos: self.pos,
                             first: op.clone(),
                             second: self.tok.kind.clone(),
-                        })
+                        });
                     }
                     _ => unreachable!(),
                 }
@@ -1487,7 +1498,7 @@ where {
             lo = Some(y)
         }
         let mut hi: Option<&Expr> = None; //,
-                                          // slice or substring x[lo:hi:step]
+        // slice or substring x[lo:hi:step]
         if self.tok.kind == Token::Colon {
             self.next_token()?;
             if self.tok.kind != Token::Colon && self.tok.kind != Token::RBrack {
@@ -1519,6 +1530,48 @@ where {
         });
         Ok(slice_expr)
     }
+
+    fn assign_line_comments(&mut self, nodes: NodeIterator) {
+        if !self.sc.keep_comments {
+            return;
+        }
+
+        let mut comment_idx = 0;
+        let mut node_it = nodes.peekable();
+
+        while comment_idx < self.sc.line_comments.len() {
+            let c = self.sc.line_comments[comment_idx];
+            
+            // Find the first node that starts after this comment.
+            let mut associated_node_id = None;
+            while let Some(node) = node_it.peek() {
+                if let Some(span) = node.span() {
+                    if c.start.is_before(&span.start) {
+                        associated_node_id = node.id();
+                        break;
+                    }
+                }
+                node_it.next();
+            }
+
+            if let Some(id) = associated_node_id {
+                self.comments_before.entry(id).or_default().push(comment_idx);
+            } else {
+                // No node after this comment, it goes to comments_after of the last node?
+                // Or just keep it as trailing comments for the file.
+                // For now, let's just stop.
+            }
+            comment_idx += 1;
+        }
+
+        // Also assign suffix comments.
+        for (idx, c) in self.sc.suffix_comments.iter().enumerate() {
+            // Suffix comments are on the same line as some node.
+            // We can search for a node that ends on this line.
+            // Actually, NodeIterator doesn't give us all nodes easily if it's incomplete.
+            // But we can just use statement spans for now as a simplification.
+        }
+    }
 }
 
 fn terminates_expr_list(tok: &Token) -> bool {
@@ -1530,7 +1583,7 @@ fn terminates_expr_list(tok: &Token) -> bool {
 mod test {
 
     use super::*;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use googletest::prelude::*;
 
     #[test]
@@ -1572,108 +1625,173 @@ mod test {
                 input: "[x for x in (a if b else c)]",
                 want: "(Comprehension Body=x Clauses=((ForClause Vars=x X=(ParenExpr X=(CondExpr Cond=b True=a False=c))),))",
             },
-            TestCase{
-                input:"x[i].f(42)",
-                want: "(CallExpr Fn=(DotExpr X=(IndexExpr X=x Y=i) Name=f) Args=(42,))"
+            TestCase {
+                input: "x[i].f(42)",
+                want: "(CallExpr Fn=(DotExpr X=(IndexExpr X=x Y=i) Name=f) Args=(42,))",
             },
-            TestCase{
-                input:"x.f()",
+            TestCase {
+                input: "x.f()",
                 want: "(CallExpr Fn=(DotExpr X=x Name=f) Args=())",
             },
-            TestCase{
-                input:"x+y*z",
+            TestCase {
+                input: "x+y*z",
                 want: "(BinaryExpr X=x Op=+ Y=(BinaryExpr X=y Op=* Y=z))",
             },
-            TestCase{
-                input:"x%y-z",
+            TestCase {
+                input: "x%y-z",
                 want: "(BinaryExpr X=(BinaryExpr X=x Op=% Y=y) Op=- Y=z)",
             },
-            TestCase{
-                input:"a + b not in c",
+            TestCase {
+                input: "a + b not in c",
                 want: "(BinaryExpr X=(BinaryExpr X=a Op=+ Y=b) Op=not in Y=c)",
             },
-            TestCase{
-                input:"lambda x, *args, **kwargs: None",
+            TestCase {
+                input: "lambda x, *args, **kwargs: None",
                 want: "(LambdaExpr Params=(x,(UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),) Body=None)",
             },
-            TestCase{ input:r#"{"one": 1}"#,
-                want: r#"(DictExpr List=((DictEntry Key="one" Value=1),))"#
+            TestCase {
+                input: r#"{"one": 1}"#,
+                want: r#"(DictExpr List=((DictEntry Key="one" Value=1),))"#,
             },
-            TestCase{ input:"a[i]",
-                want: "(IndexExpr X=a Y=i)"},
-            TestCase{ input:"a[i:]",
-                want: "(SliceExpr X=a Lo=i)"},
-                TestCase{ input:"a[:j]",
-                want: "(SliceExpr X=a Hi=j)"},
-            TestCase{ input:"a[::]",
-                want: "(SliceExpr X=a)"},
-            TestCase{ input:"a[::k]",
-                want: "(SliceExpr X=a Step=k)"},
-                TestCase{ input:"[]",
-                want: "(ListExpr List=())"},
-            TestCase{ input:"[1]",
-                want: "(ListExpr List=(1,))"},
-            TestCase{ input:"[1,]",
-                want: "(ListExpr List=(1,))"},
-            TestCase{ input:"[1, 2]",
-                want: "(ListExpr List=(1,2,))"},
-                TestCase{ input:"()",
-                want: "(TupleExpr List=())"},
-            TestCase{ input:"(4,)",
-                want: "(ParenExpr X=(TupleExpr List=(4,)))"},
-            TestCase{ input:"(4)",
-                want: "(ParenExpr X=4)"},
-                TestCase{ input:"(4, 5)",
-                want: "(ParenExpr X=(TupleExpr List=(4,5,)))"},
-            TestCase{ input:"1, 2, 3",
-                want: "(TupleExpr List=(1,2,3,))"},
+            TestCase {
+                input: "a[i]",
+                want: "(IndexExpr X=a Y=i)",
+            },
+            TestCase {
+                input: "a[i:]",
+                want: "(SliceExpr X=a Lo=i)",
+            },
+            TestCase {
+                input: "a[:j]",
+                want: "(SliceExpr X=a Hi=j)",
+            },
+            TestCase {
+                input: "a[::]",
+                want: "(SliceExpr X=a)",
+            },
+            TestCase {
+                input: "a[::k]",
+                want: "(SliceExpr X=a Step=k)",
+            },
+            TestCase {
+                input: "[]",
+                want: "(ListExpr List=())",
+            },
+            TestCase {
+                input: "[1]",
+                want: "(ListExpr List=(1,))",
+            },
+            TestCase {
+                input: "[1,]",
+                want: "(ListExpr List=(1,))",
+            },
+            TestCase {
+                input: "[1, 2]",
+                want: "(ListExpr List=(1,2,))",
+            },
+            TestCase {
+                input: "()",
+                want: "(TupleExpr List=())",
+            },
+            TestCase {
+                input: "(4,)",
+                want: "(ParenExpr X=(TupleExpr List=(4,)))",
+            },
+            TestCase {
+                input: "(4)",
+                want: "(ParenExpr X=4)",
+            },
+            TestCase {
+                input: "(4, 5)",
+                want: "(ParenExpr X=(TupleExpr List=(4,5,)))",
+            },
+            TestCase {
+                input: "1, 2, 3",
+                want: "(TupleExpr List=(1,2,3,))",
+            },
             //TestCase{ input:"1, 2,",
             //    "unparenthesized tuple with trailing comma"},
-            TestCase{
-                input:"{}",
-                want: "(DictExpr List=())"},
-            TestCase{
-                input:r#"{"a": 1}"#,
-                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#},
-            TestCase{
-                input:r#"{"a": 1,}"#,
-                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#},
-            TestCase{
-                input:r#"{"a": 1, "b": 2}"#,
-                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),(DictEntry Key="b" Value=2),))"#},
-            TestCase{ input:"{x: y for (x, y) in z}",
-                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=(ParenExpr X=(TupleExpr List=(x,y,))) X=z),))"},
-            TestCase{ input:"{x: y for a in b if c}",
-                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=a X=b),(IfClause Cond=c),))"},
-                TestCase{ input:"-1 + +2",
-                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=+ Y=(UnaryExpr Op=+ X=2))"},
-                TestCase{ input:r#""foo" + "bar""#,
-                want: r#"(BinaryExpr X="foo" Op=+ Y="bar")"#},
-            TestCase{ input:"-1 * 2", // prec(unary -) > prec(binary *)
-                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=* Y=2)"},
-            TestCase{ input:"-x[i]", // prec(unary -) < prec(x[i])
-                want: "(UnaryExpr Op=- X=(IndexExpr X=x Y=i))"},
-                TestCase{ input:"a | b & c | d", // prec(|) < prec(&)
-                want: "(BinaryExpr X=(BinaryExpr X=a Op=| Y=(BinaryExpr X=b Op=& Y=c)) Op=| Y=d)"},
-            TestCase{ input:"a or b and c or d",
-                want: "(BinaryExpr X=(BinaryExpr X=a Op=or Y=(BinaryExpr X=b Op=and Y=c)) Op=or Y=d)"},
-            TestCase{ input:"a and b or c and d",
-                want: "(BinaryExpr X=(BinaryExpr X=a Op=and Y=b) Op=or Y=(BinaryExpr X=c Op=and Y=d))"},
-                TestCase{ input:"f(1, x=y)",
-                want: "(CallExpr Fn=f Args=(1,(BinaryExpr X=x Op== Y=y),))"},
-            TestCase{ input:"f(*args, **kwargs)",
-                want: "(CallExpr Fn=f Args=((UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),))"},
-            TestCase{ input:"lambda *args, *, x=1, **kwargs: 0",
-                want: "(LambdaExpr Params=((UnaryExpr Op=* X=args),(UnaryExpr Op=*),(BinaryExpr X=x Op== Y=1),(UnaryExpr Op=** X=kwargs),) Body=0)"},
-                TestCase{ input:"lambda *, a, *b: 0",
-                want: "(LambdaExpr Params=((UnaryExpr Op=*),a,(UnaryExpr Op=* X=b),) Body=0)"},
-            TestCase{ input:"a if b else c",
-                want: "(CondExpr Cond=b True=a False=c)"},
-                TestCase{ input:"a and not b",
-                want: "(BinaryExpr X=a Op=and Y=(UnaryExpr Op=not X=b))"},
-                TestCase{ input:"[e for x in y if cond1 if cond2]",
-                want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))"}, // github.com/google/skylark/issues/53
-                ];
+            TestCase {
+                input: "{}",
+                want: "(DictExpr List=())",
+            },
+            TestCase {
+                input: r#"{"a": 1}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#,
+            },
+            TestCase {
+                input: r#"{"a": 1,}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),))"#,
+            },
+            TestCase {
+                input: r#"{"a": 1, "b": 2}"#,
+                want: r#"(DictExpr List=((DictEntry Key="a" Value=1),(DictEntry Key="b" Value=2),))"#,
+            },
+            TestCase {
+                input: "{x: y for (x, y) in z}",
+                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=(ParenExpr X=(TupleExpr List=(x,y,))) X=z),))",
+            },
+            TestCase {
+                input: "{x: y for a in b if c}",
+                want: "(Comprehension Curly Body=(DictEntry Key=x Value=y) Clauses=((ForClause Vars=a X=b),(IfClause Cond=c),))",
+            },
+            TestCase {
+                input: "-1 + +2",
+                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=+ Y=(UnaryExpr Op=+ X=2))",
+            },
+            TestCase {
+                input: r#""foo" + "bar""#,
+                want: r#"(BinaryExpr X="foo" Op=+ Y="bar")"#,
+            },
+            TestCase {
+                input: "-1 * 2", // prec(unary -) > prec(binary *)
+                want: "(BinaryExpr X=(UnaryExpr Op=- X=1) Op=* Y=2)",
+            },
+            TestCase {
+                input: "-x[i]", // prec(unary -) < prec(x[i])
+                want: "(UnaryExpr Op=- X=(IndexExpr X=x Y=i))",
+            },
+            TestCase {
+                input: "a | b & c | d", // prec(|) < prec(&)
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=| Y=(BinaryExpr X=b Op=& Y=c)) Op=| Y=d)",
+            },
+            TestCase {
+                input: "a or b and c or d",
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=or Y=(BinaryExpr X=b Op=and Y=c)) Op=or Y=d)",
+            },
+            TestCase {
+                input: "a and b or c and d",
+                want: "(BinaryExpr X=(BinaryExpr X=a Op=and Y=b) Op=or Y=(BinaryExpr X=c Op=and Y=d))",
+            },
+            TestCase {
+                input: "f(1, x=y)",
+                want: "(CallExpr Fn=f Args=(1,(BinaryExpr X=x Op== Y=y),))",
+            },
+            TestCase {
+                input: "f(*args, **kwargs)",
+                want: "(CallExpr Fn=f Args=((UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),))",
+            },
+            TestCase {
+                input: "lambda *args, *, x=1, **kwargs: 0",
+                want: "(LambdaExpr Params=((UnaryExpr Op=* X=args),(UnaryExpr Op=*),(BinaryExpr X=x Op== Y=1),(UnaryExpr Op=** X=kwargs),) Body=0)",
+            },
+            TestCase {
+                input: "lambda *, a, *b: 0",
+                want: "(LambdaExpr Params=((UnaryExpr Op=*),a,(UnaryExpr Op=* X=b),) Body=0)",
+            },
+            TestCase {
+                input: "a if b else c",
+                want: "(CondExpr Cond=b True=a False=c)",
+            },
+            TestCase {
+                input: "a and not b",
+                want: "(BinaryExpr X=a Op=and Y=(UnaryExpr Op=not X=b))",
+            },
+            TestCase {
+                input: "[e for x in y if cond1 if cond2]",
+                want: "(Comprehension Body=e Clauses=((ForClause Vars=x X=y),(IfClause Cond=cond1),(IfClause Cond=cond2),))",
+            }, // github.com/google/skylark/issues/53
+        ];
         for test_case in test_cases {
             match super::parse_expr(&arena, test_case.input) {
                 Ok(expr) => {
@@ -1725,58 +1843,58 @@ mod test {
                 input: "if True: continue",
                 want: "(IfStmt Cond=True True=((BranchStmt Token=continue),) False=())",
             },
-            TestCase{
+            TestCase {
                 input: "if True: pass
 else:
                   pass",
-                          want: "(IfStmt Cond=True True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),))",
-              },
-              TestCase{
-                  input:"if a: pass\nelif b: pass\nelse: pass",
-                  want: "(IfStmt Cond=a True=((BranchStmt Token=pass),) False=((IfStmt Cond=b True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),)),))",
-              },
-              TestCase{
+                want: "(IfStmt Cond=True True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),))",
+            },
+            TestCase {
+                input: "if a: pass\nelif b: pass\nelse: pass",
+                want: "(IfStmt Cond=a True=((BranchStmt Token=pass),) False=((IfStmt Cond=b True=((BranchStmt Token=pass),) False=((BranchStmt Token=pass),)),))",
+            },
+            TestCase {
                 input: "x, y = 1, 2",
                 want: "(AssignStmt Op== LHS=(TupleExpr List=(x,y,)) RHS=(TupleExpr List=(1,2,)))",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "x[i] = 1",
                 want: "(AssignStmt Op== LHS=(IndexExpr X=x Y=i) RHS=1)",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "x.f = 1",
                 want: "(AssignStmt Op== LHS=(DotExpr X=x Name=f) RHS=1)",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "(x, y) = 1",
                 want: "(AssignStmt Op== LHS=(ParenExpr X=(TupleExpr List=(x,y,))) RHS=1)",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: r#"load("", "a", b="c")"#,
                 want: r#"(LoadStmt From=(a,c,) To=(a,b,))"#,
-              },
-              TestCase{
+            },
+            TestCase {
                 input: r#"if True: load("", "a", b="c")"#, // load needn't be at toplevel
                 want: "(IfStmt Cond=True True=((LoadStmt From=(a,c,) To=(a,b,)),) False=())",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "def f(x, *args, **kwargs):
   pass",
                 want: "(DefStmt Name=f Params=(x,(UnaryExpr Op=* X=args),(UnaryExpr Op=** X=kwargs),) Body=((BranchStmt Token=pass),))",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "def f(**kwargs, *args): pass",
                 want: "(DefStmt Name=f Params=((UnaryExpr Op=** X=kwargs),(UnaryExpr Op=* X=args),) Body=((BranchStmt Token=pass),))",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "def f(a, b, c=d): pass",
                 want: "(DefStmt Name=f Params=(a,b,(BinaryExpr X=c Op== Y=d),) Body=((BranchStmt Token=pass),))",
-              },
-              TestCase{
+            },
+            TestCase {
                 input: "def f(a, b=c, d): pass",
                 want: "(DefStmt Name=f Params=(a,(BinaryExpr X=b Op== Y=c),d,) Body=((BranchStmt Token=pass),))",
-              }, // TODO: fix this
-              TestCase{
+            }, // TODO: fix this
+            TestCase {
                 input: r#"def f():
     def g():
         pass
@@ -1785,23 +1903,23 @@ def h():
     pass
 "#,
                 want: "(DefStmt Name=f Params=() Body=((DefStmt Name=g Params=() Body=((BranchStmt Token=pass),)),(BranchStmt Token=pass),))",
-              },
-              TestCase{
-                input:"f();g()",
+            },
+            TestCase {
+                input: "f();g()",
                 want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
-              },
-              TestCase{
-                input:"f();",
+            },
+            TestCase {
+                input: "f();",
                 want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
-              },
-              TestCase{
-                input:"f();g()\n",
+            },
+            TestCase {
+                input: "f();g()\n",
                 want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
-              },
-              TestCase{
-                input:"f();\n",
+            },
+            TestCase {
+                input: "f();\n",
                 want: "(ExprStmt X=(CallExpr Fn=f Args=()))",
-              },
+            },
         ];
         for test_case in test_cases {
             match super::parse(&arena, test_case.input) {

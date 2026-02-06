@@ -20,6 +20,7 @@ pub mod binding;
 mod id_gen;
 mod mir;
 mod parse;
+pub mod pretty;
 mod print;
 mod quote;
 mod resolve;

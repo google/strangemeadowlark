@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::token::{keyword, IntValue, Token};
+use crate::token::{IntValue, Token, keyword};
 use crate::{Arena, Literal};
 use std::fmt::Display;
 use std::path::Path;
@@ -78,6 +78,12 @@ pub struct Position {
     pub col: u32,  // 1-based column (rune) number; 0 if column unknown
 }
 
+impl Position {
+    pub fn is_before(&self, other: &Position) -> bool {
+        self.line < other.line || (self.line == other.line && self.col < other.col)
+    }
+}
+
 impl Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.line, self.col)
@@ -105,9 +111,9 @@ pub struct Scanner<'a, 'arena> {
     pub pos: Position,                                 // current input position
     depth: usize,                                      // nesting of [ ] { } ( )
     indentstk: Vec<usize>,                             // stack of indentation levels
-    dents: i8,           // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
-    line_start: bool,    // after NEWLINE; convert spaces to indentation tokens
-    keep_comments: bool, // accumulate comments in slice
+    dents: i8,               // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
+    line_start: bool,        // after NEWLINE; convert spaces to indentation tokens
+    pub keep_comments: bool, // accumulate comments in slice
     pub line_comments: Vec<&'arena Comment<'arena>>, // list of full line comments (if keepComments)
     pub suffix_comments: Vec<&'arena Comment<'arena>>, // list of suffix comments (if keepComments)
     token_buf: TokenValue,
@@ -376,7 +382,7 @@ where
                     if self.indentstk.len() > 1 {
                         if saved_line_start {
                             self.dents = 1 - self.indentstk.len() as i8;
-                            self.indentstk.pop();
+                            self.indentstk.truncate(1);
                             break 'start;
                         } else {
                             self.line_start = true;
@@ -636,7 +642,7 @@ where
                                     path: self.path_string(),
                                     pos: start,
                                     ch: '!',
-                                })
+                                });
                             }
                             '+' => {
                                 self.token_buf.kind = Token::Plus;
@@ -734,7 +740,7 @@ where
                             path: self.path_string(),
                             pos: self.pos,
                             ch: c,
-                        })
+                        });
                     }
                 }
             }
@@ -839,7 +845,7 @@ where
                     path: self.path_string(),
                     pos: self.pos,
                     msg: e.to_string(),
-                })
+                });
             }
         }
         Ok(())
@@ -1110,85 +1116,113 @@ mod tests {
         let test_cases: Vec<(&str, &str)> = vec![
             ("", "eof"),
             ("", "eof"),
-		("123", "123 eof"),
-        ("0", "0 eof"),
-        ("1", "1 eof"),
-        ("0x0a", "10 eof"),
-        ("9223372036854775808", "9223372036854775808 eof"),
-        ("1.23", "1.23 eof"),
-		("x.y", "x . y eof"),
-		("chocolate.éclair", "chocolate . éclair eof"),
-		("123 \"foo\" hello x.y", "123 \"foo\" hello x . y eof"),
-		("print(x)", "print ( x ) eof"),
-		("print(x); print(y)", "print ( x ) ; print ( y ) eof"),
-        ("/ // /= //= ///=", "/ // /= //= // /= eof"),
-		("# hello
-print(x)", "print ( x ) eof"),
-		("\nprint(\n1\n)\n", "print ( 1 ) newline eof"), // final \n is at toplevel on non-blank line => token
-            ("# hello
+            ("123", "123 eof"),
+            ("0", "0 eof"),
+            ("1", "1 eof"),
+            ("0x0a", "10 eof"),
+            ("9223372036854775808", "9223372036854775808 eof"),
+            ("1.23", "1.23 eof"),
+            ("x.y", "x . y eof"),
+            ("chocolate.éclair", "chocolate . éclair eof"),
+            ("123 \"foo\" hello x.y", "123 \"foo\" hello x . y eof"),
+            ("print(x)", "print ( x ) eof"),
+            ("print(x); print(y)", "print ( x ) ; print ( y ) eof"),
+            ("/ // /= //= ///=", "/ // /= //= // /= eof"),
+            (
+                "# hello
+print(x)",
+                "print ( x ) eof",
+            ),
+            ("\nprint(\n1\n)\n", "print ( 1 ) newline eof"), // final \n is at toplevel on non-blank line => token
+            (
+                "# hello
 print(1)
 cc_binary(name=\"foo\")
 def f(x):
     return x+1
 print(1)
-", "print ( 1 ) newline cc_binary ( name = \"foo\" ) newline def f ( x ) : newline indent return x + 1 newline outdent print ( 1 ) newline eof"),
-("def f(): pass",
-    "def f ( ) : pass eof"),
-("def f():
+",
+                "print ( 1 ) newline cc_binary ( name = \"foo\" ) newline def f ( x ) : newline indent return x + 1 newline outdent print ( 1 ) newline eof",
+            ),
+            ("def f(): pass", "def f ( ) : pass eof"),
+            (
+                "def f():
     pass
 ",
-    "def f ( ) : newline indent pass newline outdent eof"),
-("def f():
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            (
+                "def f():
     pass
 # oops",
-    "def f ( ) : newline indent pass newline outdent eof"),
-("def f():
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            (
+                "def f():
     pass \
 ",
-    "def f ( ) : newline indent pass newline outdent eof"),
-("def f():
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            (
+                "def f():
     pass
 ",
-    "def f ( ) : newline indent pass newline outdent eof"),
-("pass
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            (
+                "pass
 
 
-pass", "pass newline pass eof"), // consecutive newlines are consolidated
-("def f():
+pass",
+                "pass newline pass eof",
+            ), // consecutive newlines are consolidated
+            (
+                "def f():
     pass
-", "def f ( ) : newline indent pass newline outdent eof"),
-("def f():
+",
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            (
+                "def f():
     pass
 
-", "def f ( ) : newline indent pass newline outdent eof"),
-("pass", "pass eof"),
-		("pass\n", "pass newline eof"),
-		("pass\n ", "pass newline eof"),
-		("pass\n \n", "pass newline eof"),
-		("if x:\n  pass\n ", "if x : newline indent pass newline outdent eof"),
-		("x = 1 + \
-2", "x = 1 + 2 eof"),
-		(r#"x = 'a\nb'"#, r#"x = "a\nb" eof"#),
-		(r#"x = r'a\nb'"#, r#"x = "a\\nb" eof"#),
-		("x = 'a\\\nb'", r#"x = "ab" eof"#),
-		(r#"x = '\''"#, r#"x = "'" eof"#),
-		(r#"x = "\"""#, r#"x = "\"" eof"#),
-		(r#"x = r'\''"#, r#"x = "\\'" eof"#),
-		(r#"x = '''\''''"#, r#"x = "'" eof"#),
-		(r#"x = r'''\''''"#, r#"x = "\\'" eof"#),
-		(r#"x = ''''a'b'c'''"#, r#"x = "'a'b'c" eof"#),
-		("x = '''a\nb'''", r#"x = "a\nb" eof"#),
-		("x = '''a\rb'''", r#"x = "a\nb" eof"#),
-		("x = '''a\r\nb'''", r#"x = "a\nb" eof"#),
-		("x = '''a\n\rb'''", r#"x = "a\n\nb" eof"#),
-		("x = r'a\\\nb'", r#"x = "a\\\nb" eof"#),
-		("x = r'a\\\rb'", r#"x = "a\\\nb" eof"#),
-		("x = r'a\\\r\nb'", r#"x = "a\\\nb" eof"#),
-		("a\rb", r#"a newline b eof"#),
-		("a\nb", r#"a newline b eof"#),
-		("a\r\nb", r#"a newline b eof"#),
-		("a\n\nb", r#"a newline b eof"#),
-            ];
+",
+                "def f ( ) : newline indent pass newline outdent eof",
+            ),
+            ("pass", "pass eof"),
+            ("pass\n", "pass newline eof"),
+            ("pass\n ", "pass newline eof"),
+            ("pass\n \n", "pass newline eof"),
+            (
+                "if x:\n  pass\n ",
+                "if x : newline indent pass newline outdent eof",
+            ),
+            (
+                "x = 1 + \
+2",
+                "x = 1 + 2 eof",
+            ),
+            (r#"x = 'a\nb'"#, r#"x = "a\nb" eof"#),
+            (r#"x = r'a\nb'"#, r#"x = "a\\nb" eof"#),
+            ("x = 'a\\\nb'", r#"x = "ab" eof"#),
+            (r#"x = '\''"#, r#"x = "'" eof"#),
+            (r#"x = "\"""#, r#"x = "\"" eof"#),
+            (r#"x = r'\''"#, r#"x = "\\'" eof"#),
+            (r#"x = '''\''''"#, r#"x = "'" eof"#),
+            (r#"x = r'''\''''"#, r#"x = "\\'" eof"#),
+            (r#"x = ''''a'b'c'''"#, r#"x = "'a'b'c" eof"#),
+            ("x = '''a\nb'''", r#"x = "a\nb" eof"#),
+            ("x = '''a\rb'''", r#"x = "a\nb" eof"#),
+            ("x = '''a\r\nb'''", r#"x = "a\nb" eof"#),
+            ("x = '''a\n\rb'''", r#"x = "a\n\nb" eof"#),
+            ("x = r'a\\\nb'", r#"x = "a\\\nb" eof"#),
+            ("x = r'a\\\rb'", r#"x = "a\\\nb" eof"#),
+            ("x = r'a\\\r\nb'", r#"x = "a\\\nb" eof"#),
+            ("a\rb", r#"a newline b eof"#),
+            ("a\nb", r#"a newline b eof"#),
+            ("a\r\nb", r#"a newline b eof"#),
+            ("a\n\nb", r#"a newline b eof"#),
+        ];
         for (input, want) in test_cases {
             let mut tokens = "".to_string();
             let arena = Arena::new();

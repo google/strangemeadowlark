@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::ID_GEN;
+use std::collections::HashMap;
 use std::{cell::RefCell, fmt::Display, path::Path};
 
 use num_bigint::BigInt;
@@ -32,18 +33,15 @@ pub struct FileUnit<'a> {
     pub stmts: &'a [StmtRef<'a>],
     pub line_comments: &'a [&'a Comment<'a>], // list of full line comments (if keepComments)
     pub suffix_comments: &'a [&'a Comment<'a>], // list of suffix comments (if keepComments)
+    pub comments_before: HashMap<usize, Vec<usize>>,
+    pub comments_suffix: HashMap<usize, Vec<usize>>,
+    pub comments_after: HashMap<usize, Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span {
     pub start: Position,
     pub end: Position,
-}
-
-pub struct Comments<'a> {
-    pub before: Vec<&'a Comment<'a>>,
-    pub after: Vec<&'a Comment<'a>>,
-    pub suffix: Vec<&'a Comment<'a>>,
 }
 
 #[derive(Debug)]
