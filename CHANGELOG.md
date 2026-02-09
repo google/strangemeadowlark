@@ -12,7 +12,6 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - Implement `buildifier`-style pretty printing (4-space indent, `load` sorting, comment preservation).
-- Remove vendored `third_party` dependencies in favor of crates.io.
 
 ### 🐛 Bug Fixes
 
