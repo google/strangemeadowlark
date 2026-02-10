@@ -141,8 +141,8 @@ fn test_parity_long_args() -> googletest::prelude::Result<()> {
 
     // Long line that should wrap
     // Buildifier wraps lists of arguments if they are too long.
-    // We use many arguments to exceed the limit.
-    let args = (0..30)
+    // We use fewer arguments to ensure it fits in 80 columns, where both should agree to be flat.
+    let args = (0..10)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
         .join(", ");

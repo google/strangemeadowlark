@@ -1355,14 +1355,15 @@ impl BinOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::{FileUnit, StmtData, parse, resolve_file, resolve::FileUnitWithModule};
+    use crate::{FileUnit, StmtData, parse, resolve::FileUnitWithModule, resolve_file};
 
     use super::*;
     use anyhow::{Result, anyhow};
 
     fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<(FileUnit<'a>, Module<'a>)> {
         let file_unit = parse(arena, input)?;
-        let res = resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
+        let res =
+            resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
         let FileUnitWithModule { module, .. } = res;
         Ok((file_unit, module))
     }

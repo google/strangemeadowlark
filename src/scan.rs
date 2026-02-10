@@ -1045,9 +1045,9 @@ where
                     _ => {
                         let bigint_value = num_bigint::BigInt::parse_bytes(&s.as_bytes()[2..], 16)
                             .ok_or(ScanError::CouldNotParseHexBigInt {
-                            path: self.path_string(),
-                            pos: start,
-                        })?;
+                                path: self.path_string(),
+                                pos: start,
+                            })?;
                         self.token_buf.kind = Token::Int {
                             decoded: IntValue::BigInt(bigint_value),
                         };

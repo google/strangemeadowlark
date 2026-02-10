@@ -547,30 +547,31 @@ impl<'arena> Resolver<'arena> {
         {
             let bind = &self.bindings.borrow()[bindx.0];
             if let Some(fun_index) = b.function
-                && matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell) {
-                    let function = &self.functions.borrow()[fun_index];
-                    // Found in parent block, which belongs to enclosing function.
-                    // Add the parent's binding to the function's freevars,
-                    // and add a new 'free' binding to the inner function's block,
-                    // and turn the parent's local into cell.
-                    if bind.get_scope() == Scope::Local {
-                        bind.set_scope(Scope::Cell)
-                    }
-                    let index: u8 = function.push_free_var(bindx);
-                    if DEBUG {
-                        println!(
-                            "creating freevar {} in function at {}: {}\n",
-                            index + 1,
-                            function.pos,
-                            u.id.name
-                        )
-                    }
-                    binding_to_add = Some(Binding {
-                        first: bind.first,
-                        scope: RefCell::new(Scope::Free),
-                        index,
-                    });
-                };
+                && matches!(bind.get_scope(), Scope::Local | Scope::Free | Scope::Cell)
+            {
+                let function = &self.functions.borrow()[fun_index];
+                // Found in parent block, which belongs to enclosing function.
+                // Add the parent's binding to the function's freevars,
+                // and add a new 'free' binding to the inner function's block,
+                // and turn the parent's local into cell.
+                if bind.get_scope() == Scope::Local {
+                    bind.set_scope(Scope::Cell)
+                }
+                let index: u8 = function.push_free_var(bindx);
+                if DEBUG {
+                    println!(
+                        "creating freevar {} in function at {}: {}\n",
+                        index + 1,
+                        function.pos,
+                        u.id.name
+                    )
+                }
+                binding_to_add = Some(Binding {
+                    first: bind.first,
+                    scope: RefCell::new(Scope::Free),
+                    index,
+                });
+            };
         }
         if let Some(bind) = binding_to_add {
             bindx = self.new_binding(bind)
@@ -852,12 +853,11 @@ impl<'arena> Resolver<'arena> {
                 },
                 Some(bindx) => (*bindx, true),
             };
-            if !ok
-                && let Entry::Vacant(e) = self.globals.borrow_mut().entry(id.name) {
-                    // first global binding of this name
-                    bindx = self.push_module_global(id);
-                    e.insert(bindx);
-                }
+            if !ok && let Entry::Vacant(e) = self.globals.borrow_mut().entry(id.name) {
+                // first global binding of this name
+                bindx = self.push_module_global(id);
+                e.insert(bindx);
+            }
             // Assuming !self.options.GlobalReassign
             if ok {
                 let bind = &self.bindings.borrow()[bindx.0];
@@ -1303,13 +1303,14 @@ impl<'arena> Resolver<'arena> {
                         num_kwonly_params += 1
                     }
                     if let ExprData::Ident(id) = x.data
-                        && self.bind(env, id) {
-                            self.push_error(ResolveError::DuplicateParameter {
-                                path: self.path_string(),
-                                pos: *op_pos,
-                                name: id.name.to_string(),
-                            });
-                        }
+                        && self.bind(env, id)
+                    {
+                        self.push_error(ResolveError::DuplicateParameter {
+                            path: self.path_string(),
+                            pos: *op_pos,
+                            name: id.name.to_string(),
+                        });
+                    }
                     seen_optional = true
                 }
                 ExprData::UnaryExpr { op, op_pos, x, .. } => {
@@ -1425,7 +1426,8 @@ mod tests {
     use crate::{FileUnit, Mode, parse};
     fn prepare<'a>(arena: &'a Arena, input: &'a str) -> Result<(FileUnit<'a>, Module<'a>)> {
         let file_unit = parse(arena, input)?;
-        let res = resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
+        let res =
+            resolve_file(&file_unit, arena, |s| false, |s| false).map_err(|e| anyhow!("{e:?}"))?;
         let FileUnitWithModule { module, .. } = res;
         Ok((file_unit, module))
     }

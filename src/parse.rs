@@ -226,7 +226,7 @@ impl<'arena> Parser<'arena> {
         let line_comments = &*self.arena.alloc_slice_copy(&self.sc.line_comments);
         let suffix_comments = &*self.arena.alloc_slice_copy(&self.sc.suffix_comments);
 
-        self.assign_line_comments(NodeIterator::new(&stmts));
+        self.assign_comments(&stmts);
         let f = FileUnit {
             path: self.path,
             stmts: self.arena.alloc_slice_copy(&stmts.into_boxed_slice()),
@@ -557,7 +557,7 @@ impl<'arena> Parser<'arena> {
             id: self.next_stmt_id(),
             span: Span {
                 start: load_pos,
-                end: load_pos,
+                end: rparen,
             },
             data: StmtData::LoadStmt {
                 load_pos,
@@ -1530,13 +1530,13 @@ impl<'arena> Parser<'arena> {
         Ok(slice_expr)
     }
 
-    fn assign_line_comments(&mut self, nodes: NodeIterator) {
+    fn assign_comments(&mut self, stmts: &[StmtRef<'arena>]) {
         if !self.sc.keep_comments {
             return;
         }
 
         let mut comment_idx = 0;
-        let mut node_it = nodes.peekable();
+        let mut node_it = NodeIterator::new(stmts).peekable();
 
         while comment_idx < self.sc.line_comments.len() {
             let c = self.sc.line_comments[comment_idx];
@@ -1545,10 +1545,11 @@ impl<'arena> Parser<'arena> {
             let mut associated_node_id = None;
             while let Some(node) = node_it.peek() {
                 if let Some(span) = node.span()
-                    && c.start.is_before(&span.start) {
-                        associated_node_id = node.id();
-                        break;
-                    }
+                    && c.start.is_before(&span.start)
+                {
+                    associated_node_id = node.id();
+                    break;
+                }
                 node_it.next();
             }
 
@@ -1568,9 +1569,19 @@ impl<'arena> Parser<'arena> {
         // Also assign suffix comments.
         for (idx, c) in self.sc.suffix_comments.iter().enumerate() {
             // Suffix comments are on the same line as some node.
-            // We can search for a node that ends on this line.
-            // Actually, NodeIterator doesn't give us all nodes easily if it's incomplete.
-            // But we can just use statement spans for now as a simplification.
+            // We search for the node that ends on this line.
+            let node_it = NodeIterator::new(stmts);
+            let mut associated_node_id = None;
+            for node in node_it {
+                if let Some(span) = node.span()
+                    && span.end.line == c.start.line {
+                        associated_node_id = node.id();
+                        break; // Stop at first (outermost) match
+                    }
+            }
+            if let Some(id) = associated_node_id {
+                self.comments_suffix.entry(id).or_default().push(idx);
+            }
         }
     }
 }

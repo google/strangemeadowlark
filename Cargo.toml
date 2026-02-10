@@ -1,12 +1,16 @@
 [package]
 name = "strangemeadowlark"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "Apache-2.0"
 keywords = ["starlark"]
 categories = ["development-tools"]
 description = "Parser for the Starlark configuration language. Ported from https://github.com/google/starlark-go"
 repository = "https://github.com/google/strangemeadowlark/"
+
+[[bin]]
+name = "strangemeadowlark_formatter"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

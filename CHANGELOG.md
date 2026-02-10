@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-02-10
+
+### 🚀 Features
+
+- Add `strangemeadowlark_formatter` binary for formatting Starlark files.
+- Improve pretty printer to closely match `buildifier` output style:
+    - Preserve blank lines between top-level statements.
+    - Respect original multiline formatting for lists, calls, and function definitions.
+    - Correct handling of suffix comments (placed before trailing comma).
+    - Fix trailing comma logic (only when broken, or single-element tuple).
+    - Normalize single-line lists to have no spaces inside brackets.
+
+### 🐛 Bug Fixes
+
+- Fix incorrect association of suffix comments with innermost AST nodes (now associates with outermost node on the line).
+- Fix `LoadStmt` span calculation in parser to correctly include closing parenthesis.
+- Fix double parenthesis issue when pretty printing `ParenExpr` containing `TupleExpr`.
+
 ## [0.6.0] - 2026-02-06
 
 ### ⚠️ Breaking Changes
