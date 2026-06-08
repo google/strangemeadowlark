@@ -824,6 +824,7 @@ impl<'arena> Resolver<'arena> {
                 return b;
             }
             env = b.parent;
+            b = self.block(env);
         }
     }
 

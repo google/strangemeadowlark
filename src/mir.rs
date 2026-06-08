@@ -606,6 +606,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
             Clause::IfClause { cond, .. } => {
                 let then_b = self.create_block();
                 let else_b = self.create_block();
+                let merge_b = self.create_block();
 
                 let cond_val = self.operand(*cond);
                 let cond_tmp = self.create_tmp();
@@ -625,9 +626,12 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
                 self.current = then_b;
                 self.lower_comprehension_clauses(body, clauses, clause_idx + 1, result_local, curly);
+                self.terminate(Terminator::Jump(merge_b));
 
                 self.current = else_b;
-                // Nothing to do for the else branch - just fall through
+                self.terminate(Terminator::Jump(merge_b));
+
+                self.current = merge_b;
             }
         }
     }
@@ -2353,7 +2357,6 @@ def foo(x):
     }
 
     #[test]
-    #[ignore] // Parser hangs on comprehension inside function body
     fn test_list_comprehension() -> Result<()> {
         let arena = Arena::new();
         let result = run_func(
@@ -2367,7 +2370,6 @@ def foo(x):
     }
 
     #[test]
-    #[ignore] // Parser hangs on comprehension inside function body
     fn test_list_comprehension_with_filter() -> Result<()> {
         let arena = Arena::new();
         let result = run_func(
@@ -2381,7 +2383,6 @@ def foo(x):
     }
 
     #[test]
-    #[ignore] // Parser hangs on comprehension inside function body
     fn test_nested_comprehension() -> Result<()> {
         let arena = Arena::new();
         let result = run_func(
