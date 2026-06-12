@@ -526,6 +526,22 @@ fn pretty_expr_internal<'a>(expr: &'a Expr<'a>, state: &mut PrinterState<'a>) ->
             }
             doc
         }
+        ExprData::TypedParam {
+            name,
+            type_ann,
+            default,
+            ..
+        } => {
+            let mut doc = RcDoc::text(name.name)
+                .append(RcDoc::text(": "))
+                .append(RcDoc::as_string(type_ann.to_string()));
+            if let Some(default) = default {
+                doc = doc
+                    .append(RcDoc::text(" = "))
+                    .append(pretty_expr(default, state));
+            }
+            doc
+        }
     }
 }
 

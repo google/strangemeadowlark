@@ -650,6 +650,12 @@ where
                                 return Ok(());
                             }
                             '-' => {
+                                if self.peek() == '>' {
+                                    self.read();
+                                    self.token_buf.kind = Token::Arrow;
+                                    self.mark_end_token();
+                                    return Ok(());
+                                }
                                 self.token_buf.kind = Token::Minus;
                                 self.mark_end_token();
                                 return Ok(());

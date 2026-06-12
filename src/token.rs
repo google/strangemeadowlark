@@ -78,6 +78,7 @@ pub enum Token {
     LtLtEq,       // <<=
     GtGtEq,       // >>=
     StarStar,     // **
+    Arrow,        // ->
 
     // Keywords
     And,
@@ -224,6 +225,7 @@ impl Display for Token {
             Token::LtLtEq => token_text!["<<="],
             Token::GtGtEq => token_text![">>="],
             Token::StarStar => token_text!["**"],
+            Token::Arrow => token_text!["->"],
             Token::And => token_text!["and"],
             Token::Break => token_text!["break"],
             Token::Continue => token_text!["continue"],

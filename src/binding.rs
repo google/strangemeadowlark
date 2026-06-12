@@ -95,6 +95,7 @@ pub struct Function<'a> {
     pub name: &'a str,              // name of def, or "lambda"
     pub params: &'a [&'a Expr<'a>], // param = ident | ident=expr | * | *ident | **ident
     pub body: &'a [&'a Stmt<'a>],   // contains synthetic 'return expr' for lambda
+    pub return_type: Option<&'a crate::syntax::TypeExpr<'a>>, // return type annotation
 
     pub has_varargs: RefCell<bool>, // whether params includes *args (convenience)
     pub has_kwargs: RefCell<bool>,  // whether params includes **kwargs (convenience)

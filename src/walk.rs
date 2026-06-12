@@ -282,6 +282,9 @@ fn node_sup(node: Node, index: usize) -> (Option<Node>, usize) {
             ExprData::UnaryExpr { x, .. } => {
                 (x.map(Node::ExprRef), if x.is_some() { 1 } else { 0 })
             }
+            ExprData::TypedParam { default, .. } => {
+                (default.map(Node::ExprRef), if default.is_some() { 1 } else { 0 })
+            }
 
             // no children
             _ => (None, 0),

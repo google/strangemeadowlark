@@ -644,6 +644,7 @@ impl<'arena> Resolver<'arena> {
                 lparen,
                 params,
                 rparen,
+                return_type,
                 body,
                 function,
             } => {
@@ -654,6 +655,7 @@ impl<'arena> Resolver<'arena> {
                     name: name.name,
                     params,
                     body,
+                    return_type: return_type.as_ref().copied(),
                     has_varargs: RefCell::new(false),
                     has_kwargs: RefCell::new(false),
                     num_kwonly_params: RefCell::new(0),
@@ -1211,6 +1213,7 @@ impl<'arena> Resolver<'arena> {
             }
             ExprData::LambdaExpr {
                 params,
+                return_type,
                 body,
                 function,
                 ..
@@ -1228,6 +1231,7 @@ impl<'arena> Resolver<'arena> {
                             return_pos: e.span.start,
                         },
                     })]),
+                    return_type: return_type.as_ref().copied(),
                     has_kwargs: RefCell::new(false),
                     has_varargs: RefCell::new(false),
                     num_kwonly_params: RefCell::new(0),
@@ -1238,6 +1242,12 @@ impl<'arena> Resolver<'arena> {
                 *function.borrow_mut() = Some(fun_index);
             }
             ExprData::ParenExpr { x, .. } => self.expr(env, x),
+
+            ExprData::TypedParam { default, .. } => {
+                if let Some(default) = default {
+                    self.expr(env, default);
+                }
+            }
 
             _ => panic!("unexpected expr {e:?}"),
         }
@@ -1250,8 +1260,10 @@ impl<'arena> Resolver<'arena> {
         };
         // Resolve defaults in enclosing environment.
         for param in params.iter() {
-            if let ExprData::BinaryExpr { y, .. } = param.data {
-                self.expr(env, y);
+            match &param.data {
+                ExprData::BinaryExpr { y, .. } => self.expr(env, y),
+                ExprData::TypedParam { default: Some(y), .. } => self.expr(env, y),
+                _ => {}
             }
         }
 
@@ -1343,6 +1355,47 @@ impl<'arena> Resolver<'arena> {
                         }
                     }
                 }
+                ExprData::TypedParam {
+                    name,
+                    default,
+                    ..
+                } => {
+                    // e.g. x: int or x: int = 0
+                    if let Some(star_star) = star_star {
+                        if default.is_some() {
+                            self.push_error(ResolveError::OptionalParameterMayNotFollowStarStar {
+                                path: self.path_string(),
+                                pos: name.name_pos,
+                                name: star_star.name.to_string(),
+                            });
+                        } else {
+                            self.push_error(ResolveError::RequiredParameterMayNotFollowStarStar {
+                                path: self.path_string(),
+                                pos: name.name_pos,
+                                name: star_star.name.to_string(),
+                            });
+                        }
+                    } else if star.is_some() {
+                        num_kwonly_params += 1;
+                    } else if default.is_some() {
+                        seen_optional = true;
+                    } else if seen_optional {
+                        self.push_error(ResolveError::RequiredParameterMayNotFollowOptional {
+                            path: self.path_string(),
+                            pos: name.name_pos,
+                        });
+                    }
+                    if self.bind(env, name) {
+                        self.push_error(ResolveError::DuplicateParameter {
+                            path: self.path_string(),
+                            pos: name.name_pos,
+                            name: name.name.to_string(),
+                        });
+                    }
+                    if default.is_some() {
+                        seen_optional = true;
+                    }
+                }
                 _ => {
                     panic!("unexpected {param:?}")
                 }
@@ -1355,7 +1408,20 @@ impl<'arena> Resolver<'arena> {
         //   def f(a, b, *args, c=0, **kwargs)
         //   def f(a, b, *,     c=0, **kwargs)
         if let Some(star) = star {
-            if let ExprData::Ident(id) = star.data {
+            // star.data is either UnaryExpr{Star, Some(Ident)} for *args,
+            // or UnaryExpr{Star, None} for bare *.
+            let star_ident: Option<&Ident> = match &star.data {
+                ExprData::Ident(id) => Some(id),
+                ExprData::UnaryExpr { op: Token::Star, x: Some(e), .. } => {
+                    if let ExprData::Ident(id) = &e.data {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(id) = star_ident {
                 // *args
                 if self.bind(env, id) {
                     self.push_error(ResolveError::DuplicateParameter {
@@ -1740,5 +1806,71 @@ y = bar(1)
 "#;
         let _ = prepare(&arena, input)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_varargs_is_bound() -> Result<()> {
+        // *args must be bound as a local variable
+        let arena = Arena::new();
+        let input = "def f(x, *args):\n  return args";
+        let (file_unit, module) = prepare(&arena, input)?;
+
+        if let StmtData::DefStmt { function, .. } = &file_unit.stmts[0].data {
+            let fun_index = function.borrow().unwrap();
+            let fun = &module.functions[fun_index];
+            assert!(*fun.has_varargs.borrow());
+            // args should be bound as a local
+            let locals = fun.locals.borrow();
+            let args_binding = &module.bindings[locals[1].0]; // locals: [x, args]
+            assert_that!(args_binding.first, ident_has_name("args"));
+            Ok(())
+        } else {
+            Err(anyhow!("expected DefStmt"))
+        }
+    }
+
+    #[test]
+    fn test_varargs_with_kwargs_is_bound() -> Result<()> {
+        // *args + **kwargs: both must be bound as local variables
+        let arena = Arena::new();
+        let input = "def f(x, *args, **kwargs):\n  return args";
+        let (file_unit, module) = prepare(&arena, input)?;
+
+        if let StmtData::DefStmt { function, .. } = &file_unit.stmts[0].data {
+            let fun_index = function.borrow().unwrap();
+            let fun = &module.functions[fun_index];
+            assert!(*fun.has_varargs.borrow());
+            assert!(*fun.has_kwargs.borrow());
+            let locals = fun.locals.borrow();
+            // locals: [x, args, kwargs]
+            let args_binding = &module.bindings[locals[1].0];
+            let kwargs_binding = &module.bindings[locals[2].0];
+            assert_that!(args_binding.first, ident_has_name("args"));
+            assert_that!(kwargs_binding.first, ident_has_name("kwargs"));
+            Ok(())
+        } else {
+            Err(anyhow!("expected DefStmt"))
+        }
+    }
+
+    #[test]
+    fn test_kwargs_only_is_bound() -> Result<()> {
+        // **kwargs without *args
+        let arena = Arena::new();
+        let input = "def f(x, **kwargs):\n  return kwargs";
+        let (file_unit, module) = prepare(&arena, input)?;
+
+        if let StmtData::DefStmt { function, .. } = &file_unit.stmts[0].data {
+            let fun_index = function.borrow().unwrap();
+            let fun = &module.functions[fun_index];
+            assert!(!*fun.has_varargs.borrow());
+            assert!(*fun.has_kwargs.borrow());
+            let locals = fun.locals.borrow();
+            let kwargs_binding = &module.bindings[locals[1].0];
+            assert_that!(kwargs_binding.first, ident_has_name("kwargs"));
+            Ok(())
+        } else {
+            Err(anyhow!("expected DefStmt"))
+        }
     }
 }

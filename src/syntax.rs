@@ -25,6 +25,72 @@ use crate::{
     token::Token,
 };
 
+/// Type expression for type annotations.
+/// These are syntactic only in Phase 1 — they attach to the AST
+/// but do not affect MIR lowering or execution.
+#[derive(Debug)]
+pub enum TypeExpr<'a> {
+    NoneType,
+    Bool,
+    Int,
+    Float,
+    Str,
+    Label,
+    List(&'a TypeExpr<'a>),
+    Dict(&'a TypeExpr<'a>, &'a TypeExpr<'a>),
+    Tuple(&'a [&'a TypeExpr<'a>]),
+    Any,
+    Name(&'a Ident<'a>), // named type (record name or forward reference)
+}
+
+impl Display for TypeExpr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeExpr::NoneType => write!(f, "None"),
+            TypeExpr::Bool => write!(f, "bool"),
+            TypeExpr::Int => write!(f, "int"),
+            TypeExpr::Float => write!(f, "float"),
+            TypeExpr::Str => write!(f, "str"),
+            TypeExpr::Label => write!(f, "label"),
+            TypeExpr::List(elem) => write!(f, "list[{}]", elem),
+            TypeExpr::Dict(key, val) => write!(f, "dict[{}, {}]", key, val),
+            TypeExpr::Tuple(elems) => {
+                write!(f, "tuple[")?;
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", e)?;
+                }
+                write!(f, "]")
+            }
+            TypeExpr::Any => write!(f, "Any"),
+            TypeExpr::Name(id) => write!(f, "{}", id.name),
+        }
+    }
+}
+
+impl PartialEq for TypeExpr<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::NoneType, Self::NoneType) => true,
+            (Self::Bool, Self::Bool) => true,
+            (Self::Int, Self::Int) => true,
+            (Self::Float, Self::Float) => true,
+            (Self::Str, Self::Str) => true,
+            (Self::Label, Self::Label) => true,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::Dict(ak, av), Self::Dict(bk, bv)) => ak == bk && av == bv,
+            (Self::Tuple(a), Self::Tuple(b)) => a == b,
+            (Self::Any, Self::Any) => true,
+            (Self::Name(a), Self::Name(b)) => a.name == b.name,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TypeExpr<'_> {}
+
 pub type StmtRef<'a> = &'a Stmt<'a>;
 
 #[derive(Debug, PartialEq)]
@@ -81,6 +147,7 @@ pub enum StmtData<'a> {
         lparen: Position,
         params: &'a [ExprRef<'a>],
         rparen: Position,
+        return_type: Option<&'a TypeExpr<'a>>, // type annotation after ->
         body: &'a [StmtRef<'a>],
         function: RefCell<Option<usize>>,
     },
@@ -149,16 +216,18 @@ impl PartialEq for StmtData<'_> {
                 Self::DefStmt {
                     name: l_name,
                     params: l_params,
+                    return_type: l_rt,
                     body: l_body,
                     ..
                 },
                 Self::DefStmt {
                     name: r_name,
                     params: r_params,
+                    return_type: r_rt,
                     body: r_body,
                     ..
                 },
-            ) => l_name == r_name && l_params == r_params && l_body == r_body,
+            ) => l_name == r_name && l_params == r_params && l_rt == r_rt && l_body == r_body,
             (Self::ExprStmt { x: l_x }, Self::ExprStmt { x: r_x }) => l_x == r_x,
             (
                 Self::ForStmt {
@@ -255,13 +324,17 @@ impl Display for StmtData<'_> {
             ),
             StmtData::BranchStmt { token, .. } => write!(f, "(BranchStmt Token={token})"),
             StmtData::DefStmt {
-                name, params, body, ..
+                name, params, return_type, body, ..
             } => {
                 write!(f, "(DefStmt Name={} Params=(", name.name)?;
                 for p in params.iter() {
                     write!(f, "{},", p.data)?;
                 }
-                write!(f, ") Body=(")?;
+                if let Some(rt) = return_type {
+                    write!(f, ") ReturnType={} Body=(", rt)?;
+                } else {
+                    write!(f, ") Body=(")?;
+                }
                 for stmt in body.iter() {
                     write!(f, "{},", stmt.data)?;
                 }
@@ -385,8 +458,9 @@ pub enum ExprData<'a> {
     },
     LambdaExpr {
         lambda_pos: Position,
-        // param = ident | ident=expr | * | *ident | **ident
+        // param = ident | ident=expr | * | *ident | **ident | ident:type | ident:type=expr
         params: &'a [ExprRef<'a>],
+        return_type: Option<&'a TypeExpr<'a>>, // type annotation after ->
         body: ExprRef<'a>,
 
         // Name resolution fills in the index of a resolver::Function
@@ -423,6 +497,13 @@ pub enum ExprData<'a> {
         op_pos: Position,
         op: Token,
         x: Option<ExprRef<'a>>, // may be nil if Op==STAR),
+    },
+    /// A typed parameter: `x: int` or `x: int = 0`
+    TypedParam {
+        name: &'a Ident<'a>,
+        colon: Position,
+        type_ann: &'a TypeExpr<'a>,
+        default: Option<ExprRef<'a>>,
     },
 }
 
@@ -517,15 +598,17 @@ impl PartialEq for ExprData<'_> {
             (
                 Self::LambdaExpr {
                     params: l_params,
+                    return_type: l_rt,
                     body: l_body,
                     ..
                 },
                 Self::LambdaExpr {
                     params: r_params,
+                    return_type: r_rt,
                     body: r_body,
                     ..
                 },
-            ) => l_params == r_params && l_body == r_body,
+            ) => l_params == r_params && l_rt == r_rt && l_body == r_body,
             (Self::ListExpr { list: l_list, .. }, Self::ListExpr { list: r_list, .. }) => {
                 l_list == r_list
             }
@@ -560,6 +643,20 @@ impl PartialEq for ExprData<'_> {
                     op: r_op, x: r_x, ..
                 },
             ) => l_op == r_op && l_x == r_x,
+            (
+                Self::TypedParam {
+                    name: l_name,
+                    type_ann: l_type,
+                    default: l_default,
+                    ..
+                },
+                Self::TypedParam {
+                    name: r_name,
+                    type_ann: r_type,
+                    default: r_default,
+                    ..
+                },
+            ) => l_name.name == r_name.name && l_type == r_type && l_default == r_default,
             _ => false,
         }
     }
@@ -624,12 +721,16 @@ impl Display for ExprData<'_> {
             ExprData::IndexExpr { x, y, .. } => {
                 write!(f, "(IndexExpr X={} Y={})", x.data, y.data)
             }
-            ExprData::LambdaExpr { params, body, .. } => {
+            ExprData::LambdaExpr { params, return_type, body, .. } => {
                 write!(f, "(LambdaExpr Params=(")?;
                 for param in params.iter() {
                     write!(f, "{},", param.data)?;
                 }
-                write!(f, ") Body={})", body.data)
+                if let Some(rt) = return_type {
+                    write!(f, ") ReturnType={} Body={})", rt, body.data)
+                } else {
+                    write!(f, ") Body={})", body.data)
+                }
             }
             ExprData::ListExpr { list, .. } => {
                 write!(f, "(ListExpr List=(")?;
@@ -668,6 +769,18 @@ impl Display for ExprData<'_> {
                 Some(x) => write!(f, "(UnaryExpr Op={} X={})", op, x.data),
                 _ => write!(f, "(UnaryExpr Op={op})"),
             },
+            ExprData::TypedParam {
+                name,
+                type_ann,
+                default,
+                ..
+            } => {
+                if let Some(default) = default {
+                    write!(f, "(TypedParam Name={} TypeAnn={} Default={})", name.name, type_ann, default.data)
+                } else {
+                    write!(f, "(TypedParam Name={} TypeAnn={})", name.name, type_ann)
+                }
+            }
         }
     }
 }

@@ -210,7 +210,7 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.write(&token.to_string())?;
             }
             StmtData::DefStmt {
-                name, params, body, ..
+                name, params, return_type, body, ..
             } => {
                 let is_module = self.current_indent == 0;
                 self.write(&format!("def {}(", name.name))?;
@@ -221,7 +221,11 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                     self.print_comma_separated(params.iter())?;
                     self.pop_indent();
                 }
-                self.write("):")?;
+                self.write(")")?;
+                if let Some(rt) = return_type {
+                    self.write(&format!(" -> {}", rt))?;
+                }
+                self.write(":")?;
                 self.print_newline(&stmt.span)?;
                 self.incr_indent();
                 for stmt in body.iter() {
@@ -456,8 +460,12 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.print_expr(y)?;
                 self.write("]")?;
             }
-            ExprData::LambdaExpr { params, body, .. } => {
+            ExprData::LambdaExpr { params, return_type, body, .. } => {
+                self.write("lambda ")?;
                 self.print_comma_separated(params.iter())?;
+                if let Some(rt) = return_type {
+                    self.write(&format!(" -> {}", rt))?;
+                }
                 self.write(": ")?;
                 self.print_expr(body)?;
             }
@@ -518,6 +526,20 @@ impl<'ast, 'w> Printer<'ast, 'w> {
                 self.write(&format!("{op}"))?;
                 if let Some(x) = x {
                     self.print_expr(x)?;
+                }
+            }
+            ExprData::TypedParam {
+                name,
+                type_ann,
+                default,
+                ..
+            } => {
+                self.write(name.name)?;
+                self.write(": ")?;
+                self.write(&type_ann.to_string())?;
+                if let Some(default) = default {
+                    self.write(" = ")?;
+                    self.print_expr(default)?;
                 }
             }
         }

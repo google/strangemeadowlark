@@ -26,6 +26,7 @@ mod quote;
 mod resolve;
 mod scan;
 mod syntax;
+pub mod types;
 mod token;
 mod value;
 mod walk;

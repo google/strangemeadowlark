@@ -109,6 +109,12 @@ pub enum ParseError {
         pos: Position,
         actual: Token,
     },
+    #[error("{path}:{pos} expected type expression, got {actual}")]
+    ExpectedTypeExpression {
+        path: String,
+        pos: Position,
+        actual: Token,
+    },
     #[error("{path}:{pos} unparenthesized tuple with trailing comma")]
     UnparenthesizedTupleWithTrailingComma { path: String, pos: Position },
     #[error("{0}")]
@@ -257,9 +263,15 @@ impl<'arena> Parser<'arena> {
         let id = self.parse_ident()?;
         self.consume(Token::LParen)?;
         let lparen: Position = self.pos;
-        let params = self.parse_params()?;
+        let params = self.parse_params(true)?;
         self.consume(Token::RParen)?;
         let rparen = self.pos;
+        let return_type = if self.tok.kind == Token::Arrow {
+            self.next_token()?; // consume ->
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
         self.consume(Token::Colon)?;
         let body = self.parse_suite()?;
         let stmt: &'arena mut Stmt<'arena> = self.arena.alloc(Stmt {
@@ -274,6 +286,7 @@ impl<'arena> Parser<'arena> {
                 lparen,
                 params,
                 rparen,
+                return_type,
                 body,
                 function: RefCell::new(None),
             },
@@ -748,6 +761,97 @@ impl<'arena> Parser<'arena> {
         }
     }
 
+    // type_expr = "None" | "bool" | "int" | "float" | "str" | "label"
+    //           | "list" "[" type_expr "]"
+    //           | "dict" "[" type_expr "," type_expr "]"
+    //           | "tuple" "[" type_expr ("," type_expr)* ","? "]"
+    //           | "Any"
+    //           | IDENT          (named type, e.g. record name)
+    //
+    // Type keywords (None, bool, int, float, str, label, list, dict, tuple, Any)
+    // are all identifiers in the scanner; they are recognized contextually here.
+    fn parse_type_expr(&mut self) -> Result<&'arena TypeExpr<'arena>> {
+        match &self.tok.kind {
+            Token::Ident { name } => {
+                let name_str = name.clone();
+                match name_str.as_str() {
+                    "None" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::NoneType))
+                    }
+                    "bool" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Bool))
+                    }
+                    "int" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Int))
+                    }
+                    "float" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Float))
+                    }
+                    "str" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Str))
+                    }
+                    "label" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Label))
+                    }
+                    "list" => {
+                        self.next_token()?; // consume "list"
+                        self.consume(Token::LBrack)?;
+                        let elem = self.parse_type_expr()?;
+                        self.consume(Token::RBrack)?;
+                        Ok(self.arena.alloc(TypeExpr::List(elem)))
+                    }
+                    "dict" => {
+                        self.next_token()?; // consume "dict"
+                        self.consume(Token::LBrack)?;
+                        let key = self.parse_type_expr()?;
+                        self.consume(Token::Comma)?;
+                        let val = self.parse_type_expr()?;
+                        self.consume(Token::RBrack)?;
+                        Ok(self.arena.alloc(TypeExpr::Dict(key, val)))
+                    }
+                    "tuple" => {
+                        self.next_token()?; // consume "tuple"
+                        self.consume(Token::LBrack)?;
+                        let mut elems = vec![];
+                        if self.tok.kind != Token::RBrack {
+                            elems.push(self.parse_type_expr()?);
+                            while self.tok.kind == Token::Comma {
+                                self.next_token()?;
+                                if self.tok.kind == Token::RBrack {
+                                    break; // trailing comma
+                                }
+                                elems.push(self.parse_type_expr()?);
+                            }
+                        }
+                        self.consume(Token::RBrack)?;
+                        let elems = self.arena.alloc_slice_copy(&elems.into_boxed_slice());
+                        Ok(self.arena.alloc(TypeExpr::Tuple(elems)))
+                    }
+                    "Any" => {
+                        self.next_token()?;
+                        Ok(self.arena.alloc(TypeExpr::Any))
+                    }
+                    _ => {
+                        // Named type (record name or forward reference)
+                        let id = self.parse_ident()?;
+                        Ok(self.arena.alloc(TypeExpr::Name(id)))
+                    }
+                }
+            }
+            _ => Err(ParseError::ExpectedTypeExpression {
+                path: self.path_string(),
+                pos: self.pos,
+                actual: self.tok.kind.clone(),
+            }),
+        }
+    }
+
     // params = (param COMMA)* param COMMA?
     //
     //	|
@@ -766,11 +870,12 @@ impl<'arena> Parser<'arena> {
     //	*Unary{Op: STAR}                                *
     //	*Unary{Op: STAR, X: *Ident}                     *args
     //	*Unary{Op: STARSTAR, X: *Ident}                 **kwargs
-    fn parse_params(&mut self) -> Result<&'arena [ExprRef<'arena>]> {
+    fn parse_params(&mut self, allow_type_annotations: bool) -> Result<&'arena [ExprRef<'arena>]> {
         //fn  parseParams() []Expr {
         let mut params = vec![];
         while self.tok.kind != Token::RParen
             && self.tok.kind != Token::Colon
+            && self.tok.kind != Token::Arrow
             && self.tok.kind != Token::Eof
         {
             if !params.is_empty() {
@@ -802,11 +907,42 @@ impl<'arena> Parser<'arena> {
             }
 
             // IDENT
+            // IDENT : type_expr         (only if allow_type_annotations)
+            // IDENT : type_expr = test   (only if allow_type_annotations)
             // IDENT = test
             let id = self.parse_ident()?;
+
+            if allow_type_annotations && self.tok.kind == Token::Colon {
+                // Type annotation: IDENT : type_expr (= test)?
+                let colon = self.next_token()?; // consume ':'
+                let type_ann = self.parse_type_expr()?;
+                let default = if self.tok.kind == Token::Eq {
+                    self.next_token()?; // consume '='
+                    Some(self.parse_test()?)
+                } else {
+                    None
+                };
+                let typed_param = self.arena.alloc(Expr {
+                    id: self.next_expr_id(),
+                    span: Span {
+                        start: id.name_pos,
+                        end: default
+                            .map_or(self.pos, |d: ExprRef<'arena>| d.span.end),
+                    },
+                    data: ExprData::TypedParam {
+                        name: id,
+                        colon,
+                        type_ann,
+                        default,
+                    },
+                });
+                params.push(&*typed_param);
+                continue;
+            }
+
             let id = self.arena.alloc(id.as_expr());
             if self.tok.kind == Token::Eq {
-                // default value
+                // default value (untyped)
                 let eq = self.next_token()?;
                 let dflt = self.parse_test()?;
                 let binary_expr = self.arena.alloc(Expr {
@@ -1158,9 +1294,25 @@ impl<'arena> Parser<'arena> {
     fn parse_lambda(&mut self, allow_cond: bool) -> Result<ExprRef<'arena>> {
         let lambda_pos = self.next_token()?;
         let mut params: &[&Expr] = &[];
-        if self.tok.kind != Token::Colon {
-            params = self.parse_params()?
+
+        if self.tok.kind == Token::LParen {
+            // Parenthesized params: lambda (x: int, y: str) -> bool: ...
+            // Type annotations are allowed inside parentheses because
+            // the `:` is disambiguated from the lambda body separator.
+            self.next_token()?; // consume '('
+            params = self.parse_params(true)?; // type annotations allowed
+            self.consume(Token::RParen)?;
+        } else if self.tok.kind != Token::Colon && self.tok.kind != Token::Arrow {
+            // Unparenthesized params: lambda x: ... (no type annotations)
+            params = self.parse_params(false)?;
         }
+
+        let return_type = if self.tok.kind == Token::Arrow {
+            self.next_token()?; // consume ->
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
         self.consume(Token::Colon)?;
 
         let body = if allow_cond {
@@ -1178,6 +1330,7 @@ impl<'arena> Parser<'arena> {
             data: ExprData::LambdaExpr {
                 lambda_pos,
                 params,
+                return_type,
                 body,
                 function: RefCell::new(None),
             },
@@ -1973,6 +2126,152 @@ foo() #Suffix
                 text: "#Suffix"
             }])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_annotation_def() -> googletest::prelude::Result<()> {
+        let arena = Arena::new();
+
+        // Simple typed params
+        let result = super::parse(&arena, "def f(x: int, y: str) -> bool:\n  pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=int),(TypedParam Name=y TypeAnn=str),) ReturnType=bool Body=((BranchStmt Token=pass),))"));
+
+        // Typed param with default
+        let result = super::parse(&arena, "def f(x: int = 0): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=int Default=0),) Body=((BranchStmt Token=pass),))"));
+
+        // No return type
+        let result = super::parse(&arena, "def f(x: int): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=int),) Body=((BranchStmt Token=pass),))"));
+
+        // Mix of typed and untyped
+        let result = super::parse(&arena, "def f(x: int, y): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=int),y,) Body=((BranchStmt Token=pass),))"));
+
+        // Return type only, no typed params
+        let result = super::parse(&arena, "def f(x, y) -> int: pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=(x,y,) ReturnType=int Body=((BranchStmt Token=pass),))"));
+
+        // Untyped (backward compatible)
+        let result = super::parse(&arena, "def f(x, y): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=(x,y,) Body=((BranchStmt Token=pass),))"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_annotation_complex_types() -> googletest::prelude::Result<()> {
+        let arena = Arena::new();
+
+        // list type
+        let result = super::parse(&arena, "def f(x: list[int]): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=list[int]),) Body=((BranchStmt Token=pass),))"));
+
+        // dict type
+        let result = super::parse(&arena, "def f(x: dict[str, int]): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=dict[str, int]),) Body=((BranchStmt Token=pass),))"));
+
+        // tuple type
+        let result = super::parse(&arena, "def f(x: tuple[int, str]): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=tuple[int, str]),) Body=((BranchStmt Token=pass),))"));
+
+        // label type
+        let result = super::parse(&arena, "def f(target: label): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=target TypeAnn=label),) Body=((BranchStmt Token=pass),))"));
+
+        // Any type
+        let result = super::parse(&arena, "def f(x: Any): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=x TypeAnn=Any),) Body=((BranchStmt Token=pass),))"));
+
+        // Nested: list[label]
+        let result = super::parse(&arena, "def f(deps: list[label]): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=deps TypeAnn=list[label]),) Body=((BranchStmt Token=pass),))"));
+
+        // Named type (record name)
+        let result = super::parse(&arena, "def f(p: Point): pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=((TypedParam Name=p TypeAnn=Point),) Body=((BranchStmt Token=pass),))"));
+
+        // None type
+        let result = super::parse(&arena, "def f() -> None: pass")?;
+        let s = format!("{}", result.stmts[0].data);
+        assert_that!(s, eq("(DefStmt Name=f Params=() ReturnType=None Body=((BranchStmt Token=pass),))"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_annotation_lambda() -> googletest::prelude::Result<()> {
+        let arena = Arena::new();
+
+        // Lambda with return type (unparenthesized)
+        let result = super::parse_expr(&arena, "lambda x -> int: x + 1")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=(x,) ReturnType=int Body=(BinaryExpr X=x Op=+ Y=1))"));
+
+        // Lambda without return type (backward compatible)
+        let result = super::parse_expr(&arena, "lambda x: x + 1")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=(x,) Body=(BinaryExpr X=x Op=+ Y=1))"));
+
+        // Lambda no params, with return type
+        let result = super::parse_expr(&arena, "lambda -> int: 42")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=() ReturnType=int Body=42)"));
+
+        // Parenthesized typed params: lambda (x: int) -> int: ...
+        let result = super::parse_expr(&arena, "lambda (x: int) -> int: x + 1")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=x TypeAnn=int),) ReturnType=int Body=(BinaryExpr X=x Op=+ Y=1))"));
+
+        // Parenthesized typed params without return type
+        let result = super::parse_expr(&arena, "lambda (x: int): x + 1")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=x TypeAnn=int),) Body=(BinaryExpr X=x Op=+ Y=1))"));
+
+        // Parenthesized multiple typed params
+        let result = super::parse_expr(&arena, "lambda (x: int, y: str) -> bool: True")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=x TypeAnn=int),(TypedParam Name=y TypeAnn=str),) ReturnType=bool Body=True)"));
+
+        // Parenthesized typed param with default
+        let result = super::parse_expr(&arena, "lambda (x: int = 0): x + 1")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=x TypeAnn=int Default=0),) Body=(BinaryExpr X=x Op=+ Y=1))"));
+
+        // Parenthesized untyped params (parens without type annotations)
+        let result = super::parse_expr(&arena, "lambda (x, y): x + y")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=(x,y,) Body=(BinaryExpr X=x Op=+ Y=y))"));
+
+        // Mix of typed and untyped in parenthesized params
+        let result = super::parse_expr(&arena, "lambda (x: int, y): x + y")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=x TypeAnn=int),y,) Body=(BinaryExpr X=x Op=+ Y=y))"));
+
+        // Parenthesized with complex type: list[label]
+        let result = super::parse_expr(&arena, "lambda (deps: list[label]) -> int: len(deps)")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=((TypedParam Name=deps TypeAnn=list[label]),) ReturnType=int Body=(CallExpr Fn=len Args=(deps,)))"));
+
+        // Empty parenthesized params
+        let result = super::parse_expr(&arena, "lambda () -> int: 42")?;
+        let s = format!("{}", result.data);
+        assert_that!(s, eq("(LambdaExpr Params=() ReturnType=int Body=42)"));
+
         Ok(())
     }
 }

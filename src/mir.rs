@@ -21,10 +21,11 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use crate::Arena;
-use crate::binding::{BindingIndex, Module, Scope};
+use crate::binding::{BindingIndex, Function, Module, Scope};
 use crate::scan::Position;
+use crate::types::StaticType;
 use crate::value::{StarlarkType, Value};
-use crate::{Clause, ExprData, ExprRef, Ident, Literal, StmtData, StmtRef, Token};
+use crate::{Clause, Expr, ExprData, ExprRef, Ident, Literal, StmtData, StmtRef, Token};
 
 /// Lowered representation of a function body.
 pub struct Lowered<'a> {
@@ -216,6 +217,7 @@ impl Operand {
 #[derive(PartialEq, Eq)]
 struct LocalDef<'a> {
     name: Option<&'a Ident<'a>>,
+    static_type: StaticType,
 }
 
 impl Display for LocalDef<'_> {
@@ -343,6 +345,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
             | ExprData::DictExpr { .. }
             | ExprData::CondExpr { .. }
             | ExprData::UnaryExpr { .. }
+            | ExprData::TypedParam { .. }
             | ExprData::IndexExpr { .. }
             | ExprData::DotExpr { .. }
             | ExprData::SliceExpr { .. }
@@ -939,6 +942,15 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 });
                 Rvalue::UnaryOp(un_op, operand)
             }
+            ExprData::TypedParam { name, default, .. } => {
+                // Type annotations don't affect MIR lowering.
+                // If there's a default value, lower it; otherwise this shouldn't
+                // appear as a standalone rvalue.
+                match default {
+                    Some(d) => self.rvalue(*d),
+                    None => Rvalue::Use(Operand::Constant(Value::None)),
+                }
+            }
         }
     }
 
@@ -949,6 +961,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         let name = self.arena.alloc_str(format!("_{n}").as_str());
         self.locals.push(LocalDef {
             name: Some(self.arena.alloc(Ident::new(Position::new(), name))),
+            static_type: StaticType::any(),
         });
         Local(n as _)
     }
@@ -966,7 +979,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         cell: Option<BindingIndex>,
     ) -> Local {
         let n = self.locals.len();
-        let local = LocalDef { name: Some(id) };
+        let local = LocalDef { name: Some(id), static_type: StaticType::any() };
         self.locals.push(local);
         Local(n as _)
     }
@@ -995,15 +1008,21 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
             // debug only
             let mut func_info = func.name.to_string();
             func_info.push_str(" locals:");
-            for b in func.locals.borrow().iter() {
+            for (i, b) in func.locals.borrow().iter().enumerate() {
                 let bind = self.module.binding(b);
                 use std::fmt::Write;
+                let ty = if i + 1 < self.locals.len() {
+                    format!(":{}", self.locals[i + 1].static_type)
+                } else {
+                    String::new()
+                };
                 write!(
                     func_info,
-                    " {}:{} ({})",
+                    " {}:{} ({}){}",
                     bind.index,
                     bind.first.unwrap().name,
-                    bind.get_scope()
+                    bind.get_scope(),
+                    ty
                 )
                 .unwrap();
             }
@@ -1024,7 +1043,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         }
 
         // Set up LOCAL_RETURN.
-        self.locals.push(LocalDef { name: None });
+        self.locals.push(LocalDef { name: None, static_type: StaticType::any() });
 
         for local in func.locals.borrow().iter() {
             let b = self.module.binding(local);
@@ -1047,6 +1066,57 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
         for stmt in func.body {
             self.stmt(stmt);
+        }
+
+        // Phase 2: Typing pass — assign StaticType to locals based on annotations.
+        self.type_pass(func);
+    }
+
+    /// Typing pass: assign StaticType to each LocalDef based on type annotations.
+    ///
+    /// - Params with TypedParam annotations get their StaticType.
+    /// - The return local (LOCAL_RETURN) gets the return_type annotation.
+    /// - Unannotated locals remain Any (default).
+    /// - Simple local inference: if a local is assigned exactly once from a
+    ///   literal, infer the type from the literal value.
+    fn type_pass(&mut self, func: &Function<'a>) {
+        // 1. Type annotated parameters.
+        //    func.locals[0..N] correspond to params (in order).
+        //    For each param, check if it's a TypedParam and assign the type.
+        let locals = &func.locals.borrow();
+        for (param_idx, param_expr) in func.params.iter().enumerate() {
+            if let Some(_binding_idx) = locals.get(param_idx) {
+                let local_index = 1 + param_idx; // +1 for LOCAL_RETURN at index 0
+                let static_type = Self::type_for_param(param_expr);
+                if static_type != StaticType::Any {
+                    if local_index < self.locals.len() {
+                        self.locals[local_index].static_type = static_type;
+                    }
+                }
+            }
+        }
+
+        // 2. Return type annotation.
+        if let Some(return_type_expr) = &func.return_type {
+            let return_static_type = StaticType::from_type_expr(return_type_expr);
+            self.locals[LOCAL_RETURN.0].static_type = return_static_type;
+        }
+    }
+
+    /// Determine the StaticType for a parameter expression.
+    fn type_for_param(param: &Expr<'a>) -> StaticType {
+        match &param.data {
+            ExprData::TypedParam { type_ann, .. } => StaticType::from_type_expr(type_ann),
+            // *args collects surplus positional arguments into a tuple
+            ExprData::UnaryExpr { op: Token::Star, .. } => {
+                StaticType::Tuple(vec![]) // element types unknown
+            }
+            // **kwargs collects surplus named arguments into dict[str, Any]
+            ExprData::UnaryExpr { op: Token::StarStar, .. } => {
+                StaticType::Dict(Box::new(StaticType::Str), Box::new(StaticType::Any))
+            }
+            // Untyped params default to Any
+            _ => StaticType::Any,
         }
     }
 
@@ -1921,6 +1991,36 @@ mod tests {
         Err(anyhow!("function {func_name} not found"))
     }
 
+    /// Build MIR for a function and return the locals with their static types.
+    fn get_typed_locals(
+        arena: &Arena,
+        input: &str,
+        func_name: &str,
+    ) -> Result<Vec<(String, StaticType)>> {
+        let (file_unit, module) = prepare(arena, input)?;
+        for stmt in file_unit.stmts.iter() {
+            if let StmtData::DefStmt { name, function, .. } = &stmt.data {
+                if name.name == func_name {
+                    let mut builder = MirBuilder::new(arena, &module);
+                    builder.build_mir(function.borrow().unwrap());
+                    let locals: Vec<(String, StaticType)> = builder
+                        .locals
+                        .iter()
+                        .map(|ld| {
+                            let name = ld
+                                .name
+                                .map(|id| id.name.to_string())
+                                .unwrap_or_else(|| "<return>".to_string());
+                            (name, ld.static_type.clone())
+                        })
+                        .collect();
+                    return Ok(locals);
+                }
+            }
+        }
+        Err(anyhow!("function {func_name} not found"))
+    }
+
     #[test]
     fn test_empty() -> Result<()> {
         let arena = Arena::new();
@@ -2394,6 +2494,255 @@ def foo(x):
         assert_eq!(result, Value::List(Box::new([
             Value::Int(11), Value::Int(21), Value::Int(12), Value::Int(22),
         ])));
+        Ok(())
+    }
+
+    #[test]
+    fn test_typed_params() -> Result<()> {
+        let arena = Arena::new();
+        // Type annotations should not affect execution
+        let result = run_func(
+            &arena,
+            "def f(x: int, y: int) -> int:\n  return x + y\n",
+            "f",
+            &[Value::Int(3), Value::Int(4)],
+        )?;
+        assert_eq!(result, Value::Int(7));
+        Ok(())
+    }
+
+    #[test]
+    fn test_typed_params_with_default() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f(x: int = 0, y: str = \"hi\") -> str:\n  return y\n",
+            "f",
+            &[Value::Int(1), Value::String("hello".to_string())],
+        )?;
+        assert_eq!(result, Value::String("hello".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_typed_untyped_params() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f(x: int, y):\n  return x + y\n",
+            "f",
+            &[Value::Int(3), Value::Int(4)],
+        )?;
+        assert_eq!(result, Value::Int(7));
+        Ok(())
+    }
+
+    #[test]
+    fn test_lambda_return_type() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  g = lambda x -> int: x + 1\n  return g(5)\n",
+            "f",
+            &[],
+        )?;
+        assert_eq!(result, Value::Int(6));
+        Ok(())
+    }
+
+    #[test]
+    fn test_lambda_paren_typed_params() -> Result<()> {
+        let arena = Arena::new();
+        // Parenthesized typed lambda params
+        let result = run_func(
+            &arena,
+            "def f():\n  g = lambda (x: int, y: int) -> int: x + y\n  return g(3, 4)\n",
+            "f",
+            &[],
+        )?;
+        assert_eq!(result, Value::Int(7));
+
+        // Parenthesized typed param with default
+        let result = run_func(
+            &arena,
+            "def f():\n  g = lambda (x: int = 10): x + 1\n  return g(5)\n",
+            "f",
+            &[],
+        )?;
+        assert_eq!(result, Value::Int(6));
+
+        // Parenthesized untyped params
+        let result = run_func(
+            &arena,
+            "def f():\n  g = lambda (x, y): x + y\n  return g(3, 4)\n",
+            "f",
+            &[],
+        )?;
+        assert_eq!(result, Value::Int(7));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_annotated_params() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int, y: str) -> bool:\n  return x > 0\n",
+            "f",
+        )?;
+
+        // Local 0 = return (bool), Local 1 = x (int), Local 2 = y (str)
+        assert_eq!(locals[0], ("<return>".to_string(), StaticType::Bool));
+        assert_eq!(locals[1], ("x".to_string(), StaticType::Int));
+        assert_eq!(locals[2], ("y".to_string(), StaticType::Str));
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_label_param() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(target: label, deps: list[label]) -> label:\n  return target\n",
+            "f",
+        )?;
+
+        // Local 0 = return (label), Local 1 = target (label), Local 2 = deps (list[label])
+        assert_eq!(locals[0], ("<return>".to_string(), StaticType::Label));
+        assert_eq!(locals[1], ("target".to_string(), StaticType::Label));
+        assert_eq!(locals[2], ("deps".to_string(), StaticType::List(Box::new(StaticType::Label))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_untyped_params_are_any() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x, y):\n  return x + y\n",
+            "f",
+        )?;
+
+        // No annotations -> all Any
+        assert_eq!(locals[0].1, StaticType::Any); // return
+        assert_eq!(locals[1].1, StaticType::Any); // x
+        assert_eq!(locals[2].1, StaticType::Any); // y
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_mixed_typed_untyped() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int, y) -> str:\n  return y\n",
+            "f",
+        )?;
+
+        // Local 0 = return (str), Local 1 = x (int), Local 2 = y (Any)
+        assert_eq!(locals[0].1, StaticType::Str);
+        assert_eq!(locals[1].1, StaticType::Int);
+        assert_eq!(locals[2].1, StaticType::Any);
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_no_return_type() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int):\n  return x\n",
+            "f",
+        )?;
+
+        // No return type -> return local is Any
+        assert_eq!(locals[0].1, StaticType::Any);
+        assert_eq!(locals[1].1, StaticType::Int);
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_typed_param_with_default() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int = 0, y: float = 1.0) -> None:\n  pass\n",
+            "f",
+        )?;
+
+        // Types from annotations, defaults don't affect the type
+        assert_eq!(locals[0].1, StaticType::NoneType);
+        assert_eq!(locals[1].1, StaticType::Int);
+        assert_eq!(locals[2].1, StaticType::Float);
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_named_type() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(p: Point) -> Point:\n  return p\n",
+            "f",
+        )?;
+
+        // Named types become Record
+        assert_eq!(locals[0].1, StaticType::Record("Point".to_string()));
+        assert_eq!(locals[1].1, StaticType::Record("Point".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_varargs() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int, *args):\n  return args\n",
+            "f",
+        )?;
+
+        // x is int, *args is tuple (empty = element types unknown)
+        assert_eq!(locals[1].1, StaticType::Int);
+        assert_eq!(locals[2].1, StaticType::Tuple(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_kwargs() -> Result<()> {
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: int, **kwargs):\n  return kwargs\n",
+            "f",
+        )?;
+
+        // x is int, **kwargs is dict[str, Any]
+        assert_eq!(locals[1].1, StaticType::Int);
+        assert_eq!(
+            locals[2].1,
+            StaticType::Dict(Box::new(StaticType::Str), Box::new(StaticType::Any))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_pass_varargs_and_kwargs() -> Result<()> {
+        // *args + **kwargs
+        let arena = Arena::new();
+        let locals = get_typed_locals(
+            &arena,
+            "def f(x: str, *args, **kwargs):\n  return x\n",
+            "f",
+        )?;
+
+        // x is str, *args is tuple, **kwargs is dict[str, Any]
+        assert_eq!(locals[1].1, StaticType::Str);
+        assert_eq!(locals[2].1, StaticType::Tuple(vec![]));
+        assert_eq!(
+            locals[3].1,
+            StaticType::Dict(Box::new(StaticType::Str), Box::new(StaticType::Any))
+        );
         Ok(())
     }
 }
