@@ -89,7 +89,8 @@ pub enum Instruction {
 pub enum Terminator {
     Call {
         func: Local,
-        args: Box<[Local]>,
+        args: Box<[Local]>,           // positional argument values
+        kwargs: Box<[(String, Local)]>, // keyword argument name-value pairs
         destination: Local,
         target: Block,
     },
@@ -110,11 +111,13 @@ impl Terminator {
             Terminator::Call {
                 func,
                 args,
+                kwargs,
                 destination,
                 target,
             } => Terminator::Call {
                 func: *func,
                 args: args.clone(),
+                kwargs: kwargs.clone(),
                 destination: *destination,
                 target: target.apply_offset(block_offset),
             },
@@ -235,10 +238,26 @@ impl std::fmt::Debug for LocalDef<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Metadata about a function parameter for the interpreter.
+#[derive(Debug, Clone)]
+pub enum ParamKind {
+    /// A regular positional or optional parameter: `x` or `x = default`
+    Positional { name: String },
+    /// A varargs parameter: `*args`
+    VarArgs { name: String },
+    /// A keyword-only parameter: `y = default` (after * or *args)
+    KeywordOnly { name: String },
+    /// A keyword-variadic parameter: `**kwargs`
+    KwArgs { name: String },
+}
+
+#[derive(Debug, Clone)]
 pub struct FuncDescriptor {
     start_block: usize,
     frame_size: usize,
+    /// Ordered list of parameter kinds, matching the local layout
+    /// (locals[1] = first param, locals[2] = second, ...)
+    params: Vec<ParamKind>,
 }
 
 impl FuncDescriptor {
@@ -246,7 +265,39 @@ impl FuncDescriptor {
         FuncDescriptor {
             start_block: self.start_block + block_offset,
             frame_size: self.frame_size,
+            params: self.params.clone(),
         }
+    }
+
+    fn num_positional_params(&self) -> usize {
+        self.params.iter().take_while(|p| matches!(p, ParamKind::Positional { .. })).count()
+    }
+
+    fn has_varargs(&self) -> bool {
+        self.params.iter().any(|p| matches!(p, ParamKind::VarArgs { .. }))
+    }
+
+    fn has_kwargs(&self) -> bool {
+        self.params.iter().any(|p| matches!(p, ParamKind::KwArgs { .. }))
+    }
+
+    fn varargs_local(&self) -> Option<usize> {
+        self.params.iter().position(|p| matches!(p, ParamKind::VarArgs { .. })).map(|i| i + 1) // +1 for LOCAL_RETURN
+    }
+
+    fn kwargs_local(&self) -> Option<usize> {
+        self.params.iter().position(|p| matches!(p, ParamKind::KwArgs { .. })).map(|i| i + 1) // +1 for LOCAL_RETURN
+    }
+
+    fn kwonly_names(&self) -> Vec<(String, usize)> {
+        self.params
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                ParamKind::KeywordOnly { name } => Some((name.clone(), i + 1)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -318,7 +369,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 Operand::Constant(Value::Bytes(v.into_boxed_slice()))
             }
             ExprData::Ident(x) => {
-                let bindx = x.binding.borrow().unwrap();
+                let bindx = x.binding.borrow().expect(&format!("ident '{}' has no binding", x.name));
                 let bind = self.module.binding(bindx);
                 match bind.get_scope() {
                     Scope::Local => Operand::Local(self.local(x)),
@@ -735,17 +786,36 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 let func_rvalue = self.rvalue(func);
                 self.push_instr(Instruction::Assign(Place::from_local(tmp), func_rvalue));
 
-                let mut arglocals = Vec::with_capacity(args.len());
+                let mut pos_locals = Vec::new();
+                let mut kw_locals = Vec::new();
                 for arg in args.iter() {
-                    let argtmp = self.create_tmp();
-                    arglocals.push(argtmp);
-                    let arg_rvalue = self.rvalue(arg);
-                    self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                    match &arg.data {
+                        // keyword arg: name = expr (BinaryExpr with Eq)
+                        ExprData::BinaryExpr { op: Token::Eq, x, y, .. } => {
+                            let name = match &x.data {
+                                ExprData::Ident(id) => id.name.to_string(),
+                                _ => continue, // shouldn't happen in well-formed code
+                            };
+                            // Lower only the value (right-hand side), not the name
+                            let argtmp = self.create_tmp();
+                            let arg_rvalue = self.rvalue(*y);
+                            self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                            kw_locals.push((name, argtmp));
+                        }
+                        // All other args: positional (including *args/**kwargs at call site)
+                        _ => {
+                            let argtmp = self.create_tmp();
+                            let arg_rvalue = self.rvalue(arg);
+                            self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                            pos_locals.push(argtmp);
+                        }
+                    }
                 }
                 let tail = self.create_block();
                 self.terminate(Terminator::Call {
                     func: tmp,
-                    args: arglocals.into_boxed_slice(),
+                    args: pos_locals.into_boxed_slice(),
+                    kwargs: kw_locals.into_boxed_slice(),
                     destination: res,
                     target: tail,
                 });
@@ -884,6 +954,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                     FuncDescriptor {
                         start_block: block_offset,
                         frame_size: builder.locals.len(),
+                        params: Self::param_kinds_from_function(&self.module.functions[func_index]),
                     },
                 );
                 let lowered = builder.lowered_with_offset(block_offset);
@@ -999,6 +1070,59 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
     fn terminate(&mut self, t: Terminator) {
         self.blocks[self.current.0].terminator = t;
+    }
+
+    /// Extract parameter kinds from a resolved Function.
+    /// This determines how the interpreter packs args at function entry.
+    fn param_kinds_from_function(func: &Function<'a>) -> Vec<ParamKind> {
+        let mut params = Vec::new();
+        let mut seen_star = false;
+
+        for param in func.params.iter() {
+            match &param.data {
+                ExprData::Ident(id) => {
+                    if seen_star {
+                        params.push(ParamKind::KeywordOnly { name: id.name.to_string() });
+                    } else {
+                        params.push(ParamKind::Positional { name: id.name.to_string() });
+                    }
+                }
+                ExprData::BinaryExpr { x, op: Token::Eq, .. } => {
+                    if let ExprData::Ident(id) = &x.data {
+                        if seen_star {
+                            params.push(ParamKind::KeywordOnly { name: id.name.to_string() });
+                        } else {
+                            params.push(ParamKind::Positional { name: id.name.to_string() });
+                        }
+                    }
+                }
+                ExprData::UnaryExpr { op, x, .. } => {
+                    if *op == Token::Star {
+                        seen_star = true;
+                        if let Some(ExprData::Ident(id)) = x.as_ref().map(|e| &e.data) {
+                            params.push(ParamKind::VarArgs { name: id.name.to_string() });
+                        }
+                        // bare * has no local, skip
+                    } else if *op == Token::StarStar {
+                        if let Some(ExprData::Ident(id)) = x.as_ref().map(|e| &e.data) {
+                            params.push(ParamKind::KwArgs { name: id.name.to_string() });
+                        }
+                    }
+                }
+                ExprData::TypedParam { name, default, .. } => {
+                    if seen_star {
+                        params.push(ParamKind::KeywordOnly { name: name.name.to_string() });
+                    } else if default.is_some() {
+                        params.push(ParamKind::Positional { name: name.name.to_string() });
+                    } else {
+                        params.push(ParamKind::Positional { name: name.name.to_string() });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        params
     }
 
     fn build_mir(&mut self, func: usize) {
@@ -1290,6 +1414,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                     FuncDescriptor {
                         start_block: block_offset,
                         frame_size: builder.locals.len(),
+                        params: Self::param_kinds_from_function(&self.module.functions[func_index]),
                     },
                 );
                 let lowered = builder.lowered_with_offset(block_offset);
@@ -1791,6 +1916,7 @@ impl<'a> Lowered<'a> {
                 Terminator::Call {
                     func,
                     args,
+                    kwargs,
                     destination,
                     target,
                 } => {
@@ -1816,19 +1942,75 @@ impl<'a> Lowered<'a> {
                         x => return Value::Abort(format!("call: expected closure, got {:?}", x.type_name())),
                     };
 
+                    let fun_info = &self.funcs[&func_index];
                     let frame_start = fs.state.len();
 
-                    // Return
-                    fs.state.push(Value::None);
-                    for arg in args.iter() {
-                        fs.state.push(fs.read_local(arg))
-                    }
-
-                    // Grow stack to accommodate new frame.
-                    let fun_info = &self.funcs[&func_index];
-                    for _i in args.len()..fun_info.frame_size {
+                    // Build the new frame: LOCAL_RETURN + param locals.
+                    // All initialized to None, then we fill in.
+                    fs.state.push(Value::None); // LOCAL_RETURN
+                    for _ in 1..fun_info.frame_size {
                         fs.state.push(Value::None);
                     }
+
+                    // Read positional arg values from caller
+                    let pos_values: Vec<Value> = args.iter().map(|a| fs.read_local(a)).collect();
+                    // Read keyword arg values from caller
+                    let kw_values: Vec<(String, Value)> = kwargs
+                        .iter()
+                        .map(|(name, local)| (name.clone(), fs.read_local(local)))
+                        .collect();
+
+                    // Fill in parameter locals according to ParamKind layout
+                    let num_pos_params = fun_info.num_positional_params();
+                    let varargs_local = fun_info.varargs_local();
+                    let kwargs_local = fun_info.kwargs_local();
+
+                    // 1. Assign positional args to positional params (1:1)
+                    let pos_to_assign = pos_values.len().min(num_pos_params);
+                    for i in 0..pos_to_assign {
+                        let local_idx = frame_start + 1 + i; // +1 for LOCAL_RETURN
+                        fs.state[local_idx] = pos_values[i].clone();
+                    }
+
+                    // 2. Pack surplus positional args into *args tuple
+                    if let Some(va_local) = varargs_local {
+                        let surplus: Vec<Value> = pos_values[num_pos_params..].to_vec();
+                        let local_idx = frame_start + va_local;
+                        fs.state[local_idx] = Value::Tuple(surplus.into_boxed_slice());
+                    }
+
+                    // 3. Assign keyword args to their matching params
+                    let mut used_kw: Vec<bool> = vec![false; kw_values.len()];
+                    for (i, param_kind) in fun_info.params.iter().enumerate() {
+                        let param_name = match param_kind {
+                            ParamKind::Positional { name }
+                            | ParamKind::KeywordOnly { name } => name,
+                            _ => continue,
+                        };
+                        for (ki, (kw_name, kw_val)) in kw_values.iter().enumerate() {
+                            if !used_kw[ki] && kw_name == param_name {
+                                let local_idx = frame_start + 1 + i;
+                                fs.state[local_idx] = kw_val.clone();
+                                used_kw[ki] = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // 4. Pack surplus keyword args into **kwargs dict
+                    if let Some(ka_local) = kwargs_local {
+                        let mut surplus = HashMap::new();
+                        for (ki, (kw_name, kw_val)) in kw_values.iter().enumerate() {
+                            if !used_kw[ki] {
+                                surplus.insert(Value::String(kw_name.clone()), kw_val.clone());
+                            }
+                        }
+                        let local_idx = frame_start + ka_local;
+                        fs.state[local_idx] = Value::Dict(surplus);
+                    }
+
+                    // Note: defaults for optional/kwonly params are not yet implemented.
+                    // Unassigned params remain None. This will be addressed in a follow-up.
 
                     let start_block = self.funcs[&func_index].start_block;
                     fs.frames.push(Activation {
@@ -2742,6 +2924,110 @@ def foo(x):
         assert_eq!(
             locals[3].1,
             StaticType::Dict(Box::new(StaticType::Str), Box::new(StaticType::Any))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_varargs_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, *args):\n    return args\n  return g(1, 2, 3)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, 2, 3): x=1, *args = (2, 3)
+        assert_eq!(result, Value::Tuple(vec![Value::Int(2), Value::Int(3)].into_boxed_slice()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_varargs_empty_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, *args):\n    return args\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        // g(1): x=1, *args = ()
+        assert_eq!(result, Value::Tuple(vec![].into_boxed_slice()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_kwargs_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, **kwargs):\n    return kwargs\n  return g(1, y = 2, z = 3)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, y=2, z=3): x=1, **kwargs = {"y": 2, "z": 3}
+        let mut expected = HashMap::new();
+        expected.insert(Value::String("y".to_string()), Value::Int(2));
+        expected.insert(Value::String("z".to_string()), Value::Int(3));
+        assert_eq!(result, Value::Dict(expected));
+        Ok(())
+    }
+
+    #[test]
+    fn test_kwargs_empty_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, **kwargs):\n    return kwargs\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        // g(1): x=1, **kwargs = {}
+        assert_eq!(result, Value::Dict(HashMap::new()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_varargs_and_kwargs_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, *args, **kwargs):\n    return (args, kwargs)\n  return g(1, 2, 3, y = 4)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, 2, 3, y=4): x=1, *args=(2, 3), **kwargs={"y": 4}
+        let mut expected_kwargs = HashMap::new();
+        expected_kwargs.insert(Value::String("y".to_string()), Value::Int(4));
+        assert_eq!(
+            result,
+            Value::Tuple(vec![
+                Value::Tuple(vec![Value::Int(2), Value::Int(3)].into_boxed_slice()),
+                Value::Dict(expected_kwargs),
+            ].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_kwargs_named_arg_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y, **kwargs):\n    return (x, y, kwargs)\n  return g(1, y = 2, z = 3)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, y=2, z=3): x=1, y=2 (matched by name), **kwargs={"z": 3}
+        let mut expected_kwargs = HashMap::new();
+        expected_kwargs.insert(Value::String("z".to_string()), Value::Int(3));
+        assert_eq!(
+            result,
+            Value::Tuple(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Dict(expected_kwargs),
+            ].into_boxed_slice())
         );
         Ok(())
     }
