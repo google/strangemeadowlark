@@ -91,6 +91,8 @@ pub enum Terminator {
         func: Local,
         args: Box<[Local]>,           // positional argument values
         kwargs: Box<[(String, Local)]>, // keyword argument name-value pairs
+        starred_arg: Option<Local>,    // *args at call site: an iterable to unpack
+        starstar_arg: Option<Local>,   // **kwargs at call site: a dict to unpack
         destination: Local,
         target: Block,
     },
@@ -112,12 +114,16 @@ impl Terminator {
                 func,
                 args,
                 kwargs,
+                starred_arg,
+                starstar_arg,
                 destination,
                 target,
             } => Terminator::Call {
                 func: *func,
                 args: args.clone(),
                 kwargs: kwargs.clone(),
+                starred_arg: *starred_arg,
+                starstar_arg: *starstar_arg,
                 destination: *destination,
                 target: target.apply_offset(block_offset),
             },
@@ -241,12 +247,16 @@ impl std::fmt::Debug for LocalDef<'_> {
 /// Metadata about a function parameter for the interpreter.
 #[derive(Debug, Clone)]
 pub enum ParamKind {
-    /// A regular positional or optional parameter: `x` or `x = default`
+    /// A regular positional parameter: `x`
     Positional { name: String },
+    /// An optional positional parameter: `x = default`
+    Optional { name: String, default: Value },
     /// A varargs parameter: `*args`
     VarArgs { name: String },
-    /// A keyword-only parameter: `y = default` (after * or *args)
+    /// A keyword-only parameter: `y` (after * or *args, without default)
     KeywordOnly { name: String },
+    /// A keyword-only parameter with default: `y = default` (after * or *args)
+    KeywordOnlyOptional { name: String, default: Value },
     /// A keyword-variadic parameter: `**kwargs`
     KwArgs { name: String },
 }
@@ -270,7 +280,7 @@ impl FuncDescriptor {
     }
 
     fn num_positional_params(&self) -> usize {
-        self.params.iter().take_while(|p| matches!(p, ParamKind::Positional { .. })).count()
+        self.params.iter().take_while(|p| matches!(p, ParamKind::Positional { .. } | ParamKind::Optional { .. })).count()
     }
 
     fn has_varargs(&self) -> bool {
@@ -279,6 +289,11 @@ impl FuncDescriptor {
 
     fn has_kwargs(&self) -> bool {
         self.params.iter().any(|p| matches!(p, ParamKind::KwArgs { .. }))
+    }
+
+    /// Returns the number of required positional parameters.
+    fn num_required_params(&self) -> usize {
+        self.params.iter().take_while(|p| matches!(p, ParamKind::Positional { .. })).count()
     }
 
     fn varargs_local(&self) -> Option<usize> {
@@ -294,10 +309,20 @@ impl FuncDescriptor {
             .iter()
             .enumerate()
             .filter_map(|(i, p)| match p {
-                ParamKind::KeywordOnly { name } => Some((name.clone(), i + 1)),
+                ParamKind::KeywordOnly { name } | ParamKind::KeywordOnlyOptional { name, .. } => Some((name.clone(), i + 1)),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Returns the default value for a parameter at the given index, if it has one.
+    /// The index is into self.params (0-based), not including LOCAL_RETURN offset.
+    fn default_for_param(&self, param_index: usize) -> Option<&Value> {
+        match &self.params[param_index] {
+            ParamKind::Optional { default, .. } => Some(default),
+            ParamKind::KeywordOnlyOptional { default, .. } => Some(default),
+            _ => None,
+        }
     }
 }
 
@@ -369,7 +394,7 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                 Operand::Constant(Value::Bytes(v.into_boxed_slice()))
             }
             ExprData::Ident(x) => {
-                let bindx = x.binding.borrow().expect(&format!("ident '{}' has no binding", x.name));
+                let bindx = x.binding.borrow().unwrap_or_else(|| panic!("ident '{}' has no binding", x.name));
                 let bind = self.module.binding(bindx);
                 match bind.get_scope() {
                     Scope::Local => Operand::Local(self.local(x)),
@@ -788,6 +813,8 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
 
                 let mut pos_locals = Vec::new();
                 let mut kw_locals = Vec::new();
+                let mut starred_arg: Option<Local> = None;
+                let mut starstar_arg: Option<Local> = None;
                 for arg in args.iter() {
                     match &arg.data {
                         // keyword arg: name = expr (BinaryExpr with Eq)
@@ -802,7 +829,24 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                             self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
                             kw_locals.push((name, argtmp));
                         }
-                        // All other args: positional (including *args/**kwargs at call site)
+                        // *args at call site: UnaryExpr { Star, ... }
+                        ExprData::UnaryExpr { op: Token::Star, x: Some(x_expr), .. } => {
+                            let argtmp = self.create_tmp();
+                            let arg_rvalue = self.rvalue(*x_expr);
+                            self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                            starred_arg = Some(argtmp);
+                        }
+                        // **kwargs at call site: UnaryExpr { StarStar, ... }
+                        ExprData::UnaryExpr { op: Token::StarStar, x: Some(x_expr), .. } => {
+                            let argtmp = self.create_tmp();
+                            let arg_rvalue = self.rvalue(*x_expr);
+                            self.push_instr(Instruction::Assign(Place::from_local(argtmp), arg_rvalue));
+                            starstar_arg = Some(argtmp);
+                        }
+                        // Bare * at call site (shouldn't happen, but handle gracefully)
+                        ExprData::UnaryExpr { op: Token::Star, x: None, .. } => {}
+                        ExprData::UnaryExpr { op: Token::StarStar, x: None, .. } => {}
+                        // Regular positional arg
                         _ => {
                             let argtmp = self.create_tmp();
                             let arg_rvalue = self.rvalue(arg);
@@ -816,6 +860,8 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                     func: tmp,
                     args: pos_locals.into_boxed_slice(),
                     kwargs: kw_locals.into_boxed_slice(),
+                    starred_arg,
+                    starstar_arg,
                     destination: res,
                     target: tail,
                 });
@@ -1072,6 +1118,37 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
         self.blocks[self.current.0].terminator = t;
     }
 
+    /// Try to extract a constant default Value from an expression.
+    /// Returns Value::None for non-constant expressions (which is a placeholder
+    /// meaning "evaluate at call time" — not yet fully supported).
+    fn const_default(expr: &ExprRef<'a>) -> Value {
+        match &expr.data {
+            ExprData::Literal { token, .. } => match token {
+                Literal::Int(i) => Value::Int(*i),
+                Literal::BigInt(b) => Value::BigInt(b.clone()),
+                Literal::Float(f) => Value::Float(*f),
+                Literal::String(s) => Value::String(s.to_string()),
+                Literal::Bytes(b) => Value::Bytes(Vec::from(*b).into_boxed_slice()),
+            },
+            ExprData::Ident(id) => {
+                // Handle True, False, None constants
+                match id.name {
+                    "True" => Value::Bool(true),
+                    "False" => Value::Bool(false),
+                    "None" => Value::None,
+                    _ => Value::None, // non-constant default (not yet supported)
+                }
+            }
+            // Empty list literal: []
+            ExprData::ListExpr { list: [], .. } => Value::List(Vec::new().into_boxed_slice()),
+            // Empty dict literal: {}
+            ExprData::DictExpr { list: [], .. } => Value::Dict(HashMap::new()),
+            // Empty tuple: ()
+            ExprData::TupleExpr { list: [], .. } => Value::Tuple(Vec::new().into_boxed_slice()),
+            _ => Value::None, // non-constant default (not yet supported)
+        }
+    }
+
     /// Extract parameter kinds from a resolved Function.
     /// This determines how the interpreter packs args at function entry.
     fn param_kinds_from_function(func: &Function<'a>) -> Vec<ParamKind> {
@@ -1087,12 +1164,13 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                         params.push(ParamKind::Positional { name: id.name.to_string() });
                     }
                 }
-                ExprData::BinaryExpr { x, op: Token::Eq, .. } => {
+                ExprData::BinaryExpr { x, op: Token::Eq, y, .. } => {
                     if let ExprData::Ident(id) = &x.data {
+                        let default = Self::const_default(y);
                         if seen_star {
-                            params.push(ParamKind::KeywordOnly { name: id.name.to_string() });
+                            params.push(ParamKind::KeywordOnlyOptional { name: id.name.to_string(), default });
                         } else {
-                            params.push(ParamKind::Positional { name: id.name.to_string() });
+                            params.push(ParamKind::Optional { name: id.name.to_string(), default });
                         }
                     }
                 }
@@ -1103,17 +1181,22 @@ impl<'a, 'module> MirBuilder<'a, 'module> {
                             params.push(ParamKind::VarArgs { name: id.name.to_string() });
                         }
                         // bare * has no local, skip
-                    } else if *op == Token::StarStar {
-                        if let Some(ExprData::Ident(id)) = x.as_ref().map(|e| &e.data) {
+                    } else if *op == Token::StarStar
+                        && let Some(ExprData::Ident(id)) = x.as_ref().map(|e| &e.data) {
                             params.push(ParamKind::KwArgs { name: id.name.to_string() });
-                        }
                     }
                 }
                 ExprData::TypedParam { name, default, .. } => {
                     if seen_star {
-                        params.push(ParamKind::KeywordOnly { name: name.name.to_string() });
-                    } else if default.is_some() {
-                        params.push(ParamKind::Positional { name: name.name.to_string() });
+                        if let Some(dflt_expr) = default {
+                            let default = Self::const_default(dflt_expr);
+                            params.push(ParamKind::KeywordOnlyOptional { name: name.name.to_string(), default });
+                        } else {
+                            params.push(ParamKind::KeywordOnly { name: name.name.to_string() });
+                        }
+                    } else if let Some(dflt_expr) = default {
+                        let default = Self::const_default(dflt_expr);
+                        params.push(ParamKind::Optional { name: name.name.to_string(), default });
                     } else {
                         params.push(ParamKind::Positional { name: name.name.to_string() });
                     }
@@ -1917,6 +2000,8 @@ impl<'a> Lowered<'a> {
                     func,
                     args,
                     kwargs,
+                    starred_arg,
+                    starstar_arg,
                     destination,
                     target,
                 } => {
@@ -1936,7 +2021,7 @@ impl<'a> Lowered<'a> {
                                 (*func_index, cells)
                             }
                             (x, y) => {
-                                return Value::Abort(format!("call: unexpected closure format"))
+                                return Value::Abort("call: unexpected closure format".to_string())
                             }
                         },
                         x => return Value::Abort(format!("call: expected closure, got {:?}", x.type_name())),
@@ -1953,23 +2038,65 @@ impl<'a> Lowered<'a> {
                     }
 
                     // Read positional arg values from caller
-                    let pos_values: Vec<Value> = args.iter().map(|a| fs.read_local(a)).collect();
+                    let mut pos_values: Vec<Value> = args.iter().map(|a| fs.read_local(a)).collect();
+                    // Expand *args at call site
+                    if let Some(starred) = starred_arg {
+                        let starred_val = fs.read_local(starred);
+                        match &starred_val {
+                            Value::Tuple(elems) => pos_values.extend(elems.iter().cloned()),
+                            Value::List(elems) => pos_values.extend(elems.iter().cloned()),
+                            _ => return Value::Abort(format!(
+                                "argument after * must be an iterable, not {}",
+                                starred_val.type_name()
+                            )),
+                        }
+                    }
+
                     // Read keyword arg values from caller
-                    let kw_values: Vec<(String, Value)> = kwargs
+                    let mut kw_values: Vec<(String, Value)> = kwargs
                         .iter()
                         .map(|(name, local)| (name.clone(), fs.read_local(local)))
                         .collect();
+                    // Expand **kwargs at call site
+                    if let Some(starstarred) = starstar_arg {
+                        let starstar_val = fs.read_local(starstarred);
+                        match &starstar_val {
+                            Value::Dict(map) => {
+                                for (k, v) in map.iter() {
+                                    match k {
+                                        Value::String(name) => kw_values.push((name.clone(), v.clone())),
+                                        _ => return Value::Abort(format!(
+                                            "keywords must be strings, not {}",
+                                            k.type_name()
+                                        )),
+                                    }
+                                }
+                            }
+                            _ => return Value::Abort(format!(
+                                "argument after ** must be a dict, not {}",
+                                starstar_val.type_name()
+                            )),
+                        }
+                    }
 
                     // Fill in parameter locals according to ParamKind layout
                     let num_pos_params = fun_info.num_positional_params();
+                    let num_required_params = fun_info.num_required_params();
+                    let has_varargs = fun_info.has_varargs();
+                    let has_kwargs = fun_info.has_kwargs();
                     let varargs_local = fun_info.varargs_local();
                     let kwargs_local = fun_info.kwargs_local();
+
+                    // Track which param slots have been explicitly assigned
+                    let num_params = fun_info.params.len();
+                    let mut assigned: Vec<bool> = vec![false; num_params];
 
                     // 1. Assign positional args to positional params (1:1)
                     let pos_to_assign = pos_values.len().min(num_pos_params);
                     for i in 0..pos_to_assign {
                         let local_idx = frame_start + 1 + i; // +1 for LOCAL_RETURN
                         fs.state[local_idx] = pos_values[i].clone();
+                        assigned[i] = true;
                     }
 
                     // 2. Pack surplus positional args into *args tuple
@@ -1984,20 +2111,35 @@ impl<'a> Lowered<'a> {
                     for (i, param_kind) in fun_info.params.iter().enumerate() {
                         let param_name = match param_kind {
                             ParamKind::Positional { name }
-                            | ParamKind::KeywordOnly { name } => name,
+                            | ParamKind::Optional { name, .. }
+                            | ParamKind::KeywordOnly { name }
+                            | ParamKind::KeywordOnlyOptional { name, .. } => name,
                             _ => continue,
                         };
                         for (ki, (kw_name, kw_val)) in kw_values.iter().enumerate() {
                             if !used_kw[ki] && kw_name == param_name {
                                 let local_idx = frame_start + 1 + i;
                                 fs.state[local_idx] = kw_val.clone();
+                                assigned[i] = true;
                                 used_kw[ki] = true;
                                 break;
                             }
                         }
                     }
 
-                    // 4. Pack surplus keyword args into **kwargs dict
+                    // 4. Check for unexpected keyword args (no **kwargs)
+                    if !has_kwargs {
+                        for (ki, (kw_name, _)) in kw_values.iter().enumerate() {
+                            if !used_kw[ki] {
+                                return Value::Abort(format!(
+                                    "function got unexpected keyword argument \"{}\"",
+                                    kw_name
+                                ));
+                            }
+                        }
+                    }
+
+                    // 5. Pack surplus keyword args into **kwargs dict
                     if let Some(ka_local) = kwargs_local {
                         let mut surplus = HashMap::new();
                         for (ki, (kw_name, kw_val)) in kw_values.iter().enumerate() {
@@ -2009,8 +2151,57 @@ impl<'a> Lowered<'a> {
                         fs.state[local_idx] = Value::Dict(surplus);
                     }
 
-                    // Note: defaults for optional/kwonly params are not yet implemented.
-                    // Unassigned params remain None. This will be addressed in a follow-up.
+                    // 6. Apply defaults for optional params that were not assigned
+                    for (i, _param_kind) in fun_info.params.iter().enumerate() {
+                        if !assigned[i]
+                            && let Some(default) = fun_info.default_for_param(i) {
+                                let local_idx = frame_start + 1 + i;
+                                fs.state[local_idx] = default.clone();
+                                assigned[i] = true;
+                        }
+                    }
+
+                    // 7. Check for missing required positional arguments
+                    for (i, param_kind) in fun_info.params.iter().enumerate() {
+                        if i >= num_pos_params {
+                            break; // past positional params
+                        }
+                        if !assigned[i] && matches!(param_kind, ParamKind::Positional { .. }) {
+                            let name = match param_kind {
+                                ParamKind::Positional { name } => name.clone(),
+                                _ => format!("param{}", i),
+                            };
+                            return Value::Abort(format!(
+                                "function missing required positional argument: \"{}\"",
+                                name
+                            ));
+                        }
+                    }
+
+                    // 8. Check too many positional args (when no *args)
+                    if !has_varargs && pos_values.len() > num_pos_params {
+                        return Value::Abort(format!(
+                            "function takes {} positional argument{} but {} {} given",
+                            num_pos_params,
+                            if num_pos_params == 1 { "" } else { "s" },
+                            pos_values.len(),
+                            if pos_values.len() == 1 { "was" } else { "were" }
+                        ));
+                    }
+
+                    // 9. Check for missing keyword-only required arguments
+                    for (i, param_kind) in fun_info.params.iter().enumerate() {
+                        if matches!(param_kind, ParamKind::KeywordOnly { .. }) && !assigned[i] {
+                            let name = match param_kind {
+                                ParamKind::KeywordOnly { name } => name.clone(),
+                                _ => unreachable!(),
+                            };
+                            return Value::Abort(format!(
+                                "function missing required keyword-only argument: \"{}\"",
+                                name
+                            ));
+                        }
+                    }
 
                     let start_block = self.funcs[&func_index].start_block;
                     fs.frames.push(Activation {
@@ -3029,6 +3220,221 @@ def foo(x):
                 Value::Dict(expected_kwargs),
             ].into_boxed_slice())
         );
+        Ok(())
+    }
+
+    // --- Default values ---
+
+    #[test]
+    fn test_default_param_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y = 10):\n    return (x, y)\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        // g(1): x=1, y=10 (default)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(1), Value::Int(10)].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_param_overridden_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y = 10):\n    return (x, y)\n  return g(1, 2)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, 2): x=1, y=2 (overridden)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(1), Value::Int(2)].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_param_keyword_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y = 10):\n    return (x, y)\n  return g(1, y = 20)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, y=20): x=1, y=20 (keyword overrides default)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(1), Value::Int(20)].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_kwonly_default_runtime() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, *, y = 5):\n    return (x, y)\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        // g(1): x=1, y=5 (keyword-only default)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(1), Value::Int(5)].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_none_value() -> Result<()> {
+        let arena = Arena::new();
+        // Test that string default values work correctly.
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y = \"hello\"):\n    return (x, y)\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        // g(1): x=1, y="hello" (default)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(1), Value::String("hello".to_string())].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    // --- Error reporting ---
+
+    #[test]
+    fn test_error_too_many_positional_args() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x):\n    return x\n  return g(1, 2)\n",
+            "f",
+            &[],
+        )?;
+        match result {
+            Value::Abort(msg) => assert!(msg.contains("positional argument"), "got: {}", msg),
+            other => panic!("expected Abort, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_missing_required_arg() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, y):\n    return x\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        match result {
+            Value::Abort(msg) => assert!(msg.contains("missing required"), "got: {}", msg),
+            other => panic!("expected Abort, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_unexpected_keyword() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x):\n    return x\n  return g(1, y = 2)\n",
+            "f",
+            &[],
+        )?;
+        match result {
+            Value::Abort(msg) => assert!(msg.contains("unexpected keyword"), "got: {}", msg),
+            other => panic!("expected Abort, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_missing_kwonly_required() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(x, *, y):\n    return x\n  return g(1)\n",
+            "f",
+            &[],
+        )?;
+        match result {
+            Value::Abort(msg) => assert!(msg.contains("missing required keyword-only"), "got: {}", msg),
+            other => panic!("expected Abort, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    // --- Call-site *args unpacking ---
+
+    #[test]
+    fn test_call_starred_tuple() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(a, b, c):\n    return (a, b, c)\n  return g(*[2, 3, 7])\n",
+            "f",
+            &[],
+        )?;
+        // g(*[2, 3, 7]) is g(2, 3, 7)
+        assert_eq!(
+            result,
+            Value::Tuple(vec![Value::Int(2), Value::Int(3), Value::Int(7)].into_boxed_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_call_starred_mixed() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(a, b, c = 5):\n    return a * b + c\n  return g(1, *[3])\n",
+            "f",
+            &[],
+        )?;
+        // g(1, *[3]) is g(1, 3): a=1, b=3, c=5 => 1*3+5 = 8
+        assert_eq!(result, Value::Int(8));
+        Ok(())
+    }
+
+    #[test]
+    fn test_call_starstar_dict() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(a, b, c = 5):\n    return a * b + c\n  d = {\"b\": 3, \"a\": 2}\n  return g(**d)\n",
+            "f",
+            &[],
+        )?;
+        // g(**{"b": 3, "a": 2}) is g(a=2, b=3): a=2, b=3, c=5 => 2*3+5 = 11
+        assert_eq!(result, Value::Int(11));
+        Ok(())
+    }
+
+    #[test]
+    fn test_call_starstar_mixed() -> Result<()> {
+        let arena = Arena::new();
+        let result = run_func(
+            &arena,
+            "def f():\n  def g(a, b, c = 5):\n    return a * b + c\n  d = {\"b\": 3, \"c\": 7}\n  return g(1, **d)\n",
+            "f",
+            &[],
+        )?;
+        // g(1, **{"b": 3, "c": 7}) is g(1, b=3, c=7): a=1, b=3, c=7 => 1*3+7 = 10
+        assert_eq!(result, Value::Int(10));
         Ok(())
     }
 }
